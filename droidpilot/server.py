@@ -1,0 +1,150 @@
+"""MCP tool surface.
+
+Action tools return the fresh UI tree by default (observe_after=True), so a
+typical step is a single round trip: act, settle, read.
+"""
+from __future__ import annotations
+
+import os
+import time
+
+from mcp.server.mcpserver import Image, MCPServer
+
+from droidpilot.controller import Controller
+
+INSTRUCTIONS = """\
+Drive an Android device. Call `observe` first: it lists on-screen elements as
+`[eN] Class "label" #resource-id @(x,y) WxH flags`. Pass a handle like "e7" (valid
+only for the latest observe) or "x,y" device pixels to action tools. Action tools
+return the updated element list, so you rarely need a separate observe. Use
+`screenshot` only when the element list is not enough (images, canvas, games,
+web content without accessibility info).
+"""
+
+ctl = Controller(
+    serial=os.environ.get("DROIDPILOT_SERIAL") or None,
+    grpc_address=os.environ.get("DROIDPILOT_GRPC", "127.0.0.1:8554") or None,
+    min_interval_ms=int(os.environ.get("DROIDPILOT_MIN_INTERVAL_MS", "300")),
+)
+mcp = MCPServer("droidpilot", instructions=INSTRUCTIONS)
+
+
+def _after(observe_after: bool, settle_ms: int, note: str = "ok") -> str:
+    if not observe_after:
+        return note
+    time.sleep(settle_ms / 1000)
+    return f"{note}\n{ctl.observe().render()}"
+
+
+@mcp.tool()
+def observe(screenshot: bool = False, width: int = 540) -> list:
+    """List interactive and labelled elements on screen with handles. Optionally attach a screenshot."""
+    out: list = [ctl.observe().render()]
+    if screenshot:
+        out.append(Image(data=ctl.screenshot(width), format="jpeg"))
+    return out
+
+
+@mcp.tool()
+def screenshot(width: int = 540) -> Image:
+    """Current screen as JPEG, scaled to `width` px wide (the device is usually 1080 wide; scale coordinates back)."""
+    return Image(data=ctl.screenshot(width), format="jpeg")
+
+
+@mcp.tool()
+def tap(target: str, observe_after: bool = True, settle_ms: int = 500) -> str:
+    """Tap an element handle ("e7") or device coordinates ("540,1200")."""
+    ctl.tap(target)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def tap_text(text: str, exact: bool = False, observe_after: bool = True, settle_ms: int = 500) -> str:
+    """Tap the first element whose text (or content description) contains `text`."""
+    if not ctl.tap_text(text, exact):
+        return f"no element matching {text!r}"
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def long_press(target: str, hold_ms: int = 800, observe_after: bool = True, settle_ms: int = 500) -> str:
+    """Press and hold an element handle or "x,y"."""
+    ctl.long_press(target, hold_ms)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def swipe(start: str, end: str, duration_ms: int = 300, hold_ms: int = 0,
+          observe_after: bool = True, settle_ms: int = 500) -> str:
+    """Swipe from `start` to `end` (handles or "x,y"). Set hold_ms > 0 to press first, i.e. drag."""
+    ctl.swipe(start, end, duration_ms, hold_ms)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def scroll(direction: str, target: str | None = None, distance: float = 0.6, duration_ms: int = 300,
+           observe_after: bool = True, settle_ms: int = 500) -> str:
+    """Scroll "down" (reveal content below), "up", "left" or "right", within a scrollable handle or the whole screen."""
+    ctl.scroll(direction, target, distance, duration_ms)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def pinch(zoom: str, target: str | None = None, observe_after: bool = True, settle_ms: int = 500) -> str:
+    """Two-finger pinch: zoom "in" or "out", centred on a handle/"x,y" or the screen centre. Emulator gRPC only."""
+    ctl.pinch(zoom, target)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def type_text(text: str, clear: bool = False, observe_after: bool = True, settle_ms: int = 300) -> str:
+    """Type into the focused field (tap the field first). Unicode is fine. clear=True replaces existing text."""
+    ctl.type_text(text, clear)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def press_key(key: str, observe_after: bool = True, settle_ms: int = 500) -> str:
+    """Press a key: back, home, enter, recent, delete, search, volume_up, volume_down, power, ..."""
+    ctl.press(key)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def wait_for(text: str | None = None, resource_id: str | None = None, description: str | None = None,
+             timeout: float = 5, observe_after: bool = True) -> str:
+    """Wait until an element with matching text / resource id / content description appears."""
+    found = ctl.wait_for(text, resource_id, description, timeout)
+    return _after(observe_after, 0, "found" if found else f"not found after {timeout}s")
+
+
+@mcp.tool()
+def app_launch(package: str, observe_after: bool = True, settle_ms: int = 1500) -> str:
+    """Launch an app by package name (see app_list)."""
+    ctl.app_launch(package)
+    return _after(observe_after, settle_ms)
+
+
+@mcp.tool()
+def app_stop(package: str) -> str:
+    """Force-stop an app."""
+    ctl.app_stop(package)
+    return "ok"
+
+
+@mcp.tool()
+def app_current() -> dict:
+    """Foreground package and activity."""
+    return ctl.app_current()
+
+
+@mcp.tool()
+def app_list(contains: str = "") -> list[str]:
+    """Installed packages, optionally filtered by substring."""
+    return ctl.app_list(contains)
+
+
+@mcp.tool()
+def status() -> dict:
+    """Which backends are in use, screen size and pacing."""
+    return ctl.backends()
