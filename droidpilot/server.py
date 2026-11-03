@@ -90,10 +90,12 @@ def swipe(start: str, end: str, duration_ms: int = 300, hold_ms: int = 0,
 
 
 @mcp.tool()
-def scroll(direction: str, target: str | None = None, distance: float = 0.6, duration_ms: int = 300,
-           observe_after: bool = True, max_wait_ms: int = 3000) -> str:
-    """Scroll "down" (reveal content below), "up", "left" or "right", within a scrollable handle or the whole screen."""
-    return _act(lambda: ctl.scroll(direction, target, distance, duration_ms), observe_after, max_wait_ms)
+def scroll(direction: str, target: str | None = None, distance: float = 0.6, fling: bool = False,
+           duration_ms: int = 300, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
+    """Scroll "down" (reveal content below), "up", "left" or "right", within a scrollable handle or the whole
+    screen, by about `distance` of its height/width so consecutive pages overlap. fling=True lets the list
+    coast further (faster for long lists, but items can be skipped)."""
+    return _act(lambda: ctl.scroll(direction, target, distance, duration_ms, fling), observe_after, max_wait_ms)
 
 
 @mcp.tool()

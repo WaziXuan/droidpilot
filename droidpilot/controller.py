@@ -229,19 +229,25 @@ class Controller:
         else:
             self.device.call(lambda d: d.long_click(x, y, hold_ms / 1000))
 
-    def swipe(self, start: str, end: str, duration_ms: int = 300, hold_ms: int = 0) -> None:
+    def swipe(self, start: str, end: str, duration_ms: int = 300, hold_ms: int = 0,
+              end_hold_ms: int = 0) -> None:
         (x1, y1), (x2, y2) = self.resolve(start), self.resolve(end)
         self.pacer.wait()
         if self.emu:
-            self.emu.swipe(x1, y1, x2, y2, duration_ms, hold_ms)
+            self.emu.swipe(x1, y1, x2, y2, duration_ms, hold_ms, end_hold_ms)
         elif hold_ms:
             self.device.call(lambda d: d.drag(x1, y1, x2, y2, (hold_ms + duration_ms) / 1000))
         else:
             self.device.call(lambda d: d.swipe(x1, y1, x2, y2, duration_ms / 1000))
 
     def scroll(self, direction: str, target: str | None = None, distance: float = 0.6,
-               duration_ms: int = 300) -> None:
-        """Scroll content; direction is where the content moves into view ("down" reveals what's below)."""
+               duration_ms: int = 300, fling: bool = False) -> None:
+        """Scroll content; direction is where the content moves into view ("down" reveals what's below).
+
+        By default the finger pauses before lifting so the content moves by about
+        `distance` of the container and consecutive scrolls overlap; fling=True
+        lets it coast, to cover long lists quickly.
+        """
         w, h = self.screen
         x1, y1, x2, y2 = (self.element_bounds(target) if target else None) or (0, 0, w, h)
         cx, cy = (x1 + x2) // 2, (y1 + y2) // 2
@@ -255,7 +261,7 @@ class Controller:
         if direction not in vectors:
             raise TargetError(f"direction must be one of {sorted(vectors)}")
         sx, sy, ex, ey = (int(v) for v in vectors[direction])
-        self.swipe(f"{sx},{sy}", f"{ex},{ey}", duration_ms)
+        self.swipe(f"{sx},{sy}", f"{ex},{ey}", duration_ms, end_hold_ms=0 if fling else 120)
 
     def pinch(self, zoom: str, target: str | None = None, duration_ms: int = 400) -> None:
         if not self.emu:

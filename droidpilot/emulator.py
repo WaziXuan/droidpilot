@@ -74,8 +74,13 @@ class Emulator:
         self.tap(x, y, hold_ms)
 
     def swipe(self, x1: int, y1: int, x2: int, y2: int, duration_ms: int = 300,
-              hold_ms: int = 0) -> None:
-        """Press at (x1, y1), optionally hold (for drag), move to (x2, y2) over duration_ms, release."""
+              hold_ms: int = 0, end_hold_ms: int = 0) -> None:
+        """Press at (x1, y1), optionally hold (for drag), move to (x2, y2) over duration_ms, release.
+
+        end_hold_ms keeps the finger still at (x2, y2) before lifting, so the
+        release velocity is zero and lists stop where the finger stopped instead
+        of flinging on.
+        """
         self._send([(x1, y1, 0, _DOWN_PRESSURE)])
         if hold_ms:
             time.sleep(hold_ms / 1000)
@@ -83,6 +88,9 @@ class Emulator:
         for i in range(1, steps + 1):
             t = i / steps
             self._send([(x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, 0, _DOWN_PRESSURE)])
+            time.sleep(_FRAME_INTERVAL_S)
+        for _ in range(round(end_hold_ms / 1000 / _FRAME_INTERVAL_S)):
+            self._send([(x2, y2, 0, _DOWN_PRESSURE)])
             time.sleep(_FRAME_INTERVAL_S)
         self._send([(x2, y2, 0, 0)])
 

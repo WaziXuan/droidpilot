@@ -121,6 +121,13 @@ def test_nested_wrappers_with_same_label_and_box_are_listed_once():
     assert [e.text for e in snap.elements.values()] == ["Download PDF"]
 
 
+def test_children_repeating_a_labelled_control_are_dropped():
+    tile = node("[40,130][530,290]", node("[160,180][420,230]", text="Internet"),
+                class_="android.widget.Switch", content_desc="Internet, AndroidWifi", clickable="true")
+    snap = uitree.parse(hierarchy(node("[0,0][1080,2400]", tile)), SCREEN)
+    assert [e.text for e in snap.elements.values()] == ["Internet, AndroidWifi"]
+
+
 def test_handles_are_sequential_and_lines_render():
     xml = hierarchy(node("[0,0][1080,2400]",
                          node("[0,200][540,400]", text="A", clickable="true", resource_id="com.example.app:id/a")

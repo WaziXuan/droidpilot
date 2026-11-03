@@ -203,6 +203,10 @@ def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
                 clip = _intersect(clip, b) if clip else b
             interactive = _interactive(flags)
             label = _own_label(node)
+            if interactive and label:
+                # Children that only repeat part of this label (a tile's caption, say) add nothing.
+                covered.update(id(c) for c in node.iter() if c is not node and not _interactive(_flags(c))
+                               and (t := _own_label(c)) and t in label)
             if interactive and not label and "scroll" not in flags:
                 if screen and _box_area(b) > _PAGE_FRACTION * screen[0] * screen[1]:
                     # A page-sized click target (common at the root of web pages) says nothing
