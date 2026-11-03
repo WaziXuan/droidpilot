@@ -114,15 +114,19 @@ class Controller:
         return ImageStat.Stat(ImageChops.difference(a, b)).mean[0] > _FRAME_DIFF_THRESHOLD
 
     def mark(self) -> None:
-        """Record the pre-action state that `settle` compares against."""
-        self._before = (self._dump(), self._thumb())
+        """Record the pre-action state that `settle` compares against (a frame with gRPC, else the tree)."""
+        frame = self._thumb()
+        self._before = (None if frame is not None else self._dump(), frame)
 
     def settle(self, max_wait_ms: int = 3000, quiet_ms: int = 400, stable_ms: int = 250,
-               poll_ms: int = 40) -> uitree.Snapshot:
+               poll_ms: int = 30) -> uitree.Snapshot:
         """Wait for the screen to react to the last action and stop changing, then observe.
 
-        Each poll reads the UI tree (~30 ms) and, with gRPC, a tiny frame (~2 ms);
-        the frame catches ripples and transitions before the tree catches up.
+        With gRPC this polls tiny frames (~2 ms each) and reads the UI tree once at
+        the end: dumping the tree blocks while the app animates (0.5 s per dump
+        during a transition), so polling it would both slow us down and blur the
+        timing. Without gRPC it falls back to polling the tree.
+
         Returns once the screen differs from the state recorded by `mark` and has
         then been unchanged for `stable_ms` (long enough to ride out the brief
         pause while a recreated screen reloads its content), or, if nothing changes
@@ -130,25 +134,29 @@ class Controller:
         `max_wait_ms` (spinners, video, carousels never settle).
         """
         (before_xml, before_frame), self._before = getattr(self, "_before", (None, None)), (None, None)
+        use_frames = before_frame is not None
         start = time.monotonic()
-        last_xml, last_frame, still_since, changed = None, None, None, False
+        last, still_since, changed = None, None, False
         while True:
-            xml, frame = self._dump(), self._thumb()
-            now = time.monotonic()
-            elapsed = (now - start) * 1000
-            changed = changed or xml != before_xml or self._frames_differ(frame, before_frame)
-            if xml == last_xml and not self._frames_differ(frame, last_frame):
-                still_since = still_since or now
+            if use_frames:
+                cur = self._thumb()
+                changed = changed or self._frames_differ(cur, before_frame)
+                same = last is not None and not self._frames_differ(cur, last)
             else:
-                still_since = None
+                cur = self._dump()
+                changed = changed or cur != before_xml
+                same = cur == last
+            now = time.monotonic()
+            still_since = (still_since or now) if same else None
+            elapsed = (now - start) * 1000
             if still_since and (now - still_since) * 1000 >= stable_ms and (changed or elapsed >= quiet_ms):
                 break
             if elapsed >= max_wait_ms:
                 break
-            last_xml, last_frame = xml, frame
+            last = cur
             time.sleep(poll_ms / 1000)
         self.last_settle_ms = round((time.monotonic() - start) * 1000)
-        return self.observe(xml)
+        return self.observe(None if use_frames else cur)
 
     def screenshot(self, width: int = 540, quality: int = 70) -> bytes:
         if self.emu:
