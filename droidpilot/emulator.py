@@ -4,9 +4,13 @@ Used for the two things it does faster than anything running inside the guest:
 grabbing frames straight from the emulator's framebuffer, and injecting touch
 input (including multi-touch) as virtual touchscreen events.
 
-Both work in the display's natural (unrotated) orientation, while uiautomator
-reports coordinates for the current rotation. This class takes and returns
-display coordinates and does the conversion using `rotation`.
+uiautomator reports coordinates for the current display rotation. Measured on
+the emulator: touch events always use the display's natural (unrotated)
+coordinates, while frames come in the orientation of the emulator's body
+("skin"), which the window shows and which is reported with every frame. A
+frame therefore needs turning by (display rotation - skin rotation) to look like
+what the user sees. This class takes and returns display coordinates and does
+both conversions.
 """
 from __future__ import annotations
 
@@ -49,6 +53,8 @@ class Emulator:
         self._natural: tuple[int, int] | None = None
         # Current display rotation (Surface.ROTATION_*); the controller updates it from each UI dump.
         self.rotation = 0
+        # Rotation of the emulator body/window, as reported by the latest frame.
+        self.skin_rotation: int | None = None
 
     def available(self, timeout: float = 1.0) -> bool:
         try:
@@ -57,27 +63,52 @@ class Emulator:
         except grpc.FutureTimeoutError:
             return False
 
+    def _frame(self, fmt: pb.ImageFormat) -> Image.Image:
+        img = self._stub.getScreenshot(fmt)
+        self.skin_rotation = img.format.rotation.rotation
+        size = (img.format.width, img.format.height)
+        if self._natural is None and not (fmt.width or fmt.height):
+            self._natural = size[::-1] if self.skin_rotation % 2 else size
+        return Image.frombytes("RGB", size, img.image)
+
     @property
     def natural_size(self) -> tuple[int, int]:
-        """Display size in its natural (unrotated) orientation; gRPC frames always come this way up."""
+        """Display size in its natural (unrotated) orientation."""
         if self._natural is None:
-            img = self._stub.getScreenshot(pb.ImageFormat(format=pb.ImageFormat.RGB888))
-            self._natural = (img.format.width, img.format.height)
+            self._frame(pb.ImageFormat(format=pb.ImageFormat.RGB888))
         return self._natural
 
     def screenshot(self, width: int | None = None) -> Image.Image:
-        """Frame turned to match the current rotation, scaled to `width` px wide if given."""
+        """Frame as the user sees the display (upright for the current rotation), `width` px wide if given."""
         nw, nh = self.natural_size
         fmt = pb.ImageFormat(format=pb.ImageFormat.RGB888)
         if width:
-            display_w = nh if self.rotation % 2 else nw
-            scale = width / display_w
-            fmt.width, fmt.height = round(nw * scale), round(nh * scale)
-        img = self._stub.getScreenshot(fmt)
-        frame = Image.frombytes("RGB", (img.format.width, img.format.height), img.image)
-        # PIL rotates counter-clockwise; turning the natural frame by 90° per rotation step
-        # matches what the user sees (verified against uiautomator2 screenshots for 1 and 3).
-        return frame.rotate(90 * self.rotation, expand=True) if self.rotation % 4 else frame
+            scale = width / (nh if self.rotation % 2 else nw)
+            skin = self.skin_rotation or 0
+            sw, sh = (nh, nw) if skin % 2 else (nw, nh)
+            fmt.width, fmt.height = round(sw * scale), round(sh * scale)
+        frame = self._frame(fmt)
+        # PIL rotates counter-clockwise. Turning by (display - skin) quarter turns matched
+        # uiautomator2's own screenshots for all nine body/display combinations tried.
+        turn = (self.rotation - self.skin_rotation) % 4
+        if turn:
+            frame = frame.rotate(90 * turn, expand=True)
+        if width and frame.width != width:
+            # The body turned between our size estimate and the grab.
+            frame = frame.resize((width, round(frame.height * width / frame.width)))
+        return frame
+
+    def set_body_rotation(self, rotation: int) -> None:
+        """Turn the emulator's body (window and orientation sensor), as a person turns a phone.
+
+        Rotation 1 (ROTATION_90) is a +90° turn about the z axis, 3 is -90°.
+        """
+        current = self._stub.getPhysicalModel(pb.PhysicalModelValue(target=pb.PhysicalModelValue.ROTATION))
+        x, y = (list(current.value.data) + [0, 0])[:2]
+        z = {0: 0.0, 1: 90.0, 2: 180.0, 3: -90.0}[rotation % 4]
+        self._stub.setPhysicalModel(pb.PhysicalModelValue(
+            target=pb.PhysicalModelValue.ROTATION, value=pb.ParameterValue(data=[x, y, z])))
+        self.skin_rotation = rotation % 4
 
     def _send(self, touches: list[tuple[int, int, int, int]]) -> None:
         natural = self.natural_size

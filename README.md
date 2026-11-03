@@ -70,6 +70,7 @@ repeat their child. The header adds `loading` while a spinner or page-load bar i
 | `pinch(zoom, target)` | two-finger zoom in/out (gRPC) |
 | `type_text(text, clear=False)` | into the focused field; any Unicode |
 | `press_key(key)` | `back`, `home`, `recent`, ...; `enter` taps the keyboard's action key |
+| `rotate(orientation)` | `portrait` / `landscape` / `reverse_*`, by turning the device |
 | `wait_for(text, resource_id)` / `wait_idle()` | wait for an element / for loading to finish |
 | `app_launch`, `app_stop`, `app_current`, `app_list` | app management |
 | `status()` | backends in use |
@@ -103,11 +104,17 @@ Measured on an x86_64 Android 14 emulator (software rendering) on a Ryzen 7 7800
   Google app.
 - **Scrolling** pauses the finger before lifting so lists move by the requested distance instead of
   flinging past items.
-- **Rotation.** uiautomator reports coordinates for the current rotation, while gRPC frames and touch
-  events stay in the display's natural orientation. The rotation is read from every hierarchy dump
-  (no extra call); frames are turned upright before they are compared or returned, and every touch
-  point is mapped back to natural coordinates. Verified for all four rotations against the frame
-  rotation in tests, and on the emulator in both landscape directions.
+- **Rotation.** uiautomator reports coordinates for the current display rotation. On the emulator,
+  touch events always use natural (unrotated) coordinates, while gRPC frames come in the orientation
+  of the emulator's body, i.e. its window. Frames are turned by (display − body) quarter turns, which
+  matched uiautomator2's own screenshots in all nine combinations tried, and touch points are mapped
+  to natural coordinates. The rotation comes from each hierarchy dump at no extra cost.
+- **The window stays upright for whoever is watching.** When the display rotates without the body
+  (an app locking landscape, or a forced rotation setting), the content would show sideways in the
+  emulator window. droidpilot then turns the emulator's body to match, as a person turns the phone
+  to watch a landscape video. `rotate` likewise turns the body instead of forcing a system setting;
+  if the app refuses the new orientation, the body is turned back. Disable with
+  `--no-follow-rotation`.
 - **Loading bars** are waited out for at most 2 s once the picture is still (pages often keep a bar
   up for a resource that never arrives); the element list still says `loading`, and `wait_idle`
   waits for as long as you allow.

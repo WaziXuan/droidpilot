@@ -36,6 +36,7 @@ _KEYS = {
     "space": 62, "enter": 66, "delete": 67, "backspace": 67, "menu": 82,
     "escape": 111, "forward_delete": 112, "recent": 187, "recents": 187, "app_switch": 187,
 }
+_ORIENTATIONS = {"portrait": 0, "landscape": 1, "reverse_portrait": 2, "reverse_landscape": 3}
 # Names that mean "submit what I typed". KEYCODE_SEARCH is deliberately absent:
 # it launches the Google app instead of submitting the focused field.
 _SUBMIT_KEYS = {"enter", "submit", "search", "go", "send", "done", "ime_action"}
@@ -72,8 +73,11 @@ class Pacer:
 
 class Controller:
     def __init__(self, serial: str | None = None, grpc_address: str | None = "127.0.0.1:8554",
-                 min_interval_ms: int = 300):
+                 min_interval_ms: int = 300, follow_rotation: bool = True):
         self.device = Device(serial)
+        # Keep the emulator window turned the same way as the display, so whoever watches
+        # the window sees the app upright (an app forcing landscape otherwise shows sideways).
+        self.follow_rotation = follow_rotation
         self._emu = Emulator(grpc_address) if grpc_address else None
         self._emu_checked = False
         self.pacer = Pacer(min_interval_ms)
@@ -116,6 +120,10 @@ class Controller:
         self.rotation = int(m.group(1)) % 4 if m else 0
         if self.emu:
             self.emu.rotation = self.rotation
+            skin = self.emu.skin_rotation
+            if self.follow_rotation and skin is not None and skin != self.rotation:
+                log.info("display rotation %d, window %d: turning the emulator to match", self.rotation, skin)
+                self.emu.set_body_rotation(self.rotation)
 
     def backends(self) -> dict:
         self.observe()  # refresh rotation
@@ -124,6 +132,8 @@ class Controller:
             "emulator_grpc": self.emu.address if self.emu else None,
             "screen": self.screen,
             "rotation": self.rotation,
+            "window_rotation": self.emu.skin_rotation if self.emu else None,
+            "follow_rotation": self.follow_rotation,
             "min_interval_ms": round(self.pacer.min_interval * 1000),
         }
 
@@ -134,6 +144,7 @@ class Controller:
 
     def observe(self, xml: str | None = None) -> uitree.Snapshot:
         self._last_xml = xml or self._dump()
+        self.natural  # first call grabs a frame, which also tells us how the window is turned
         self._set_rotation(self._last_xml)
         self.snapshot = uitree.parse(self._last_xml, self.screen)
         return self.snapshot
@@ -341,6 +352,22 @@ class Controller:
         start, end = (near, far) if zoom == "in" else (far, near)
         self.pacer.wait()
         self.emu.pinch(cx, cy, start, end, duration_ms)
+
+    def rotate(self, orientation: str) -> None:
+        """Turn the device to portrait/landscape the way a person would: by turning it.
+
+        On the emulator this turns the body (window + orientation sensor), so the
+        display follows only if auto-rotate is on and the app allows it; if it
+        doesn't, follow_rotation turns the window back on the next observe.
+        """
+        rotation = _ORIENTATIONS.get(orientation.strip().lower())
+        if rotation is None:
+            raise TargetError(f"orientation must be one of {sorted(_ORIENTATIONS)}")
+        self.pacer.wait()
+        if self.emu:
+            self.emu.set_body_rotation(rotation)
+        else:
+            self.device.call(lambda d: d.set_orientation({0: "n", 1: "l", 2: "u", 3: "r"}[rotation]))
 
     # -- uiautomator2-only operations -------------------------------------
 

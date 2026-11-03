@@ -33,6 +33,7 @@ ctl = Controller(
     serial=os.environ.get("DROIDPILOT_SERIAL") or None,
     grpc_address=os.environ.get("DROIDPILOT_GRPC", "127.0.0.1:8554") or None,
     min_interval_ms=int(os.environ.get("DROIDPILOT_MIN_INTERVAL_MS", "300")),
+    follow_rotation=os.environ.get("DROIDPILOT_FOLLOW_ROTATION", "1") != "0",
 )
 mcp = MCPServer("droidpilot", instructions=INSTRUCTIONS)
 
@@ -113,6 +114,14 @@ def scroll(direction: str, target: str | None = None, distance: float = 0.6, fli
 def pinch(zoom: str, target: str | None = None, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Two-finger pinch: zoom "in" or "out", centred on a handle/"x,y" or the screen centre. Emulator gRPC only."""
     return _act(lambda: ctl.pinch(zoom, target), observe_after, max_wait_ms)
+
+
+@mcp.tool()
+def rotate(orientation: str, observe_after: bool = True, max_wait_ms: int = 4000) -> str:
+    """Turn the device to "portrait", "landscape", "reverse_portrait" or "reverse_landscape", like a person
+    turning the phone. The display only follows if auto-rotate is on and the app allows it; check the
+    `orientation` in the returned header."""
+    return _act(lambda: ctl.rotate(orientation), observe_after, max_wait_ms)
 
 
 @mcp.tool()
