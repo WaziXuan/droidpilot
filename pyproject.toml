@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "droidpilot"
+version = "0.1.0"
+description = "Low-latency MCP server for driving Android emulators: uiautomator2 for the UI tree, emulator gRPC for frames and touch input."
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "uiautomator2>=3.2",
+    "mcp>=2.0",
+    "grpcio>=1.60",
+    "protobuf>=5.26",
+    "pillow>=10",
+]
+
+[project.optional-dependencies]
+dev = ["grpcio-tools>=1.60", "pytest>=8"]
+
+[project.scripts]
+droidpilot = "droidpilot.__main__:main"
+
+[tool.setuptools.packages.find]
+include = ["droidpilot*"]
