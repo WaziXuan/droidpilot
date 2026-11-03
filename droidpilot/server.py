@@ -1,24 +1,24 @@
 """MCP tool surface.
 
-Action tools return the fresh UI tree by default (observe_after=True), so a
-typical step is a single round trip: act, settle, read.
+Action tools wait for the screen to settle and return the fresh UI tree by
+default (observe_after=True), so a typical step is a single round trip.
 """
 from __future__ import annotations
 
 import os
-import time
 
 from mcp.server.mcpserver import Image, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
-from droidpilot.controller import Controller
+from droidpilot.controller import Controller, TargetError
 
 INSTRUCTIONS = """\
 Drive an Android device. Call `observe` first: it lists on-screen elements as
 `[eN] Class "label" #resource-id @(x,y) WxH flags`. Pass a handle like "e7" (valid
-only for the latest observe) or "x,y" device pixels to action tools. Action tools
-return the updated element list, so you rarely need a separate observe. Use
-`screenshot` only when the element list is not enough (images, canvas, games,
-web content without accessibility info).
+only for the latest element list) or "x,y" device pixels to action tools. Action
+tools wait until the screen stops changing and return the updated element list,
+so you rarely need a separate observe. Use `screenshot` only when the element
+list is not enough (images, canvas, games, web content without accessibility info).
 """
 
 ctl = Controller(
@@ -29,11 +29,23 @@ ctl = Controller(
 mcp = MCPServer("droidpilot", instructions=INSTRUCTIONS)
 
 
-def _after(observe_after: bool, settle_ms: int, note: str = "ok") -> str:
+def _act(action, observe_after: bool, max_wait_ms: int, quiet_ms: int = 400) -> str:
+    """Run an action; if observe_after, wait for the screen to settle and return the new element list.
+
+    `action` returns None on success or a string explaining why nothing was done.
+    """
+    try:
+        if observe_after:
+            ctl.mark()
+        failure = action()
+    except TargetError as e:
+        raise ToolError(str(e)) from e
+    if failure:
+        return failure
     if not observe_after:
-        return note
-    time.sleep(settle_ms / 1000)
-    return f"{note}\n{ctl.observe().render()}"
+        return "ok"
+    snap = ctl.settle(max_wait_ms, quiet_ms)
+    return f"ok (settled in {ctl.last_settle_ms} ms)\n{snap.render()}"
 
 
 @mcp.tool()
@@ -52,77 +64,74 @@ def screenshot(width: int = 540) -> Image:
 
 
 @mcp.tool()
-def tap(target: str, observe_after: bool = True, settle_ms: int = 500) -> str:
+def tap(target: str, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Tap an element handle ("e7") or device coordinates ("540,1200")."""
-    ctl.tap(target)
-    return _after(observe_after, settle_ms)
+    return _act(lambda: ctl.tap(target), observe_after, max_wait_ms)
 
 
 @mcp.tool()
-def tap_text(text: str, exact: bool = False, observe_after: bool = True, settle_ms: int = 500) -> str:
+def tap_text(text: str, exact: bool = False, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Tap the first element whose text (or content description) contains `text`."""
-    if not ctl.tap_text(text, exact):
-        return f"no element matching {text!r}"
-    return _after(observe_after, settle_ms)
+    return _act(lambda: None if ctl.tap_text(text, exact) else f"no element matching {text!r}",
+                observe_after, max_wait_ms)
 
 
 @mcp.tool()
-def long_press(target: str, hold_ms: int = 800, observe_after: bool = True, settle_ms: int = 500) -> str:
+def long_press(target: str, hold_ms: int = 800, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Press and hold an element handle or "x,y"."""
-    ctl.long_press(target, hold_ms)
-    return _after(observe_after, settle_ms)
+    return _act(lambda: ctl.long_press(target, hold_ms), observe_after, max_wait_ms)
 
 
 @mcp.tool()
 def swipe(start: str, end: str, duration_ms: int = 300, hold_ms: int = 0,
-          observe_after: bool = True, settle_ms: int = 500) -> str:
+          observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Swipe from `start` to `end` (handles or "x,y"). Set hold_ms > 0 to press first, i.e. drag."""
-    ctl.swipe(start, end, duration_ms, hold_ms)
-    return _after(observe_after, settle_ms)
+    return _act(lambda: ctl.swipe(start, end, duration_ms, hold_ms), observe_after, max_wait_ms)
 
 
 @mcp.tool()
 def scroll(direction: str, target: str | None = None, distance: float = 0.6, duration_ms: int = 300,
-           observe_after: bool = True, settle_ms: int = 500) -> str:
+           observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Scroll "down" (reveal content below), "up", "left" or "right", within a scrollable handle or the whole screen."""
-    ctl.scroll(direction, target, distance, duration_ms)
-    return _after(observe_after, settle_ms)
+    return _act(lambda: ctl.scroll(direction, target, distance, duration_ms), observe_after, max_wait_ms)
 
 
 @mcp.tool()
-def pinch(zoom: str, target: str | None = None, observe_after: bool = True, settle_ms: int = 500) -> str:
+def pinch(zoom: str, target: str | None = None, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Two-finger pinch: zoom "in" or "out", centred on a handle/"x,y" or the screen centre. Emulator gRPC only."""
-    ctl.pinch(zoom, target)
-    return _after(observe_after, settle_ms)
+    return _act(lambda: ctl.pinch(zoom, target), observe_after, max_wait_ms)
 
 
 @mcp.tool()
-def type_text(text: str, clear: bool = False, observe_after: bool = True, settle_ms: int = 300) -> str:
+def type_text(text: str, clear: bool = False, observe_after: bool = True, max_wait_ms: int = 2000) -> str:
     """Type into the focused field (tap the field first). Unicode is fine. clear=True replaces existing text."""
-    ctl.type_text(text, clear)
-    return _after(observe_after, settle_ms)
+    return _act(lambda: ctl.type_text(text, clear), observe_after, max_wait_ms)
 
 
 @mcp.tool()
-def press_key(key: str, observe_after: bool = True, settle_ms: int = 500) -> str:
+def press_key(key: str, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
     """Press a key: back, home, enter, recent, delete, search, volume_up, volume_down, power, ..."""
-    ctl.press(key)
-    return _after(observe_after, settle_ms)
+    return _act(lambda: ctl.press(key), observe_after, max_wait_ms)
 
 
 @mcp.tool()
-def wait_for(text: str | None = None, resource_id: str | None = None, description: str | None = None,
-             timeout: float = 5, observe_after: bool = True) -> str:
-    """Wait until an element with matching text / resource id / content description appears."""
-    found = ctl.wait_for(text, resource_id, description, timeout)
-    return _after(observe_after, 0, "found" if found else f"not found after {timeout}s")
+def wait_for(text: str | None = None, resource_id: str | None = None, timeout: float = 5,
+             observe_after: bool = True) -> str:
+    """Wait until an element whose label (text or content description) contains `text`, and/or with
+    resource id `resource_id`, appears."""
+    try:
+        found = ctl.wait_for(text, resource_id, timeout)
+    except TargetError as e:
+        raise ToolError(str(e)) from e
+    note = "found" if found else f"not found after {timeout}s"
+    return f"{note}\n{ctl.snapshot.render()}" if observe_after else note
 
 
 @mcp.tool()
-def app_launch(package: str, observe_after: bool = True, settle_ms: int = 1500) -> str:
+def app_launch(package: str, observe_after: bool = True, max_wait_ms: int = 6000) -> str:
     """Launch an app by package name (see app_list)."""
-    ctl.app_launch(package)
-    return _after(observe_after, settle_ms)
+    # Cold starts can take a couple of seconds before the first frame changes.
+    return _act(lambda: ctl.app_launch(package), observe_after, max_wait_ms, quiet_ms=2500)
 
 
 @mcp.tool()

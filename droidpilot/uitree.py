@@ -12,6 +12,8 @@ from dataclasses import dataclass, field
 
 _BOUNDS = re.compile(r"\[(-?\d+),(-?\d+)\]\[(-?\d+),(-?\d+)\]")
 _LABEL_MAX = 60
+_SYSTEMUI = "com.android.systemui"
+_STATUS_BAR = "com.android.systemui:id/status_bar_container"
 
 
 @dataclass
@@ -45,10 +47,13 @@ class Element:
 @dataclass
 class Snapshot:
     package: str
+    keyboard_top: int | None = None  # y where the on-screen keyboard starts, if shown
     elements: dict[str, Element] = field(default_factory=dict)
 
     def render(self) -> str:
         head = f"package: {self.package}  elements: {len(self.elements)}"
+        if self.keyboard_top is not None:
+            head += f"  keyboard: shown (covers y>={self.keyboard_top})"
         return "\n".join([head, *(e.line() for e in self.elements.values())])
 
 
@@ -107,13 +112,30 @@ def _truncate(s: str) -> str:
     return s if len(s) <= _LABEL_MAX else s[: _LABEL_MAX - 1] + "…"
 
 
+def _area(node: ET.Element) -> int:
+    b = _bounds(node)
+    return (b[2] - b[0]) * (b[3] - b[1]) if b else 0
+
+
+def _is_ime(window: ET.Element) -> bool:
+    return "inputmethod" in window.get("package", "")
+
+
 def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
     root = ET.fromstring(xml)
-    packages = [n.get("package") for n in root.iter("node") if n.get("package")]
-    snap = Snapshot(package=packages[0] if packages else "?")
+    # Top-level nodes are windows: status bar, keyboard, dialogs, the app itself.
+    windows = [w for w in root if w.tag == "node"]
+    apps = [w for w in windows if w.get("package") != _SYSTEMUI and not _is_ime(w)]
+    main = max(apps or windows, key=_area, default=None)
+    snap = Snapshot(package=main.get("package", "?") if main is not None else "?")
+    ime = next((w for w in windows if _is_ime(w) and _bounds(w)), None)
+    if ime is not None:
+        snap.keyboard_top = _bounds(ime)[1]
     covered: set[int] = set()  # nodes whose text is already shown on an interactive ancestor
 
     def visit(node: ET.Element) -> None:
+        if node is ime or node.get("resource-id") == _STATUS_BAR:
+            return  # keyboard keys and status-bar icons are noise for the agent
         if node.tag == "node" and node.get("visible-to-user", "true") != "false":
             b = _bounds(node)
             if b and screen:
@@ -128,6 +150,8 @@ def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
                     label = _descendant_label(node)
                     covered.update(id(c) for c in node.iter() if c is not node and not _interactive(_flags(c)))
                 if interactive or (label and id(node) not in covered):
+                    if snap.keyboard_top is not None and (b[1] + b[3]) // 2 >= snap.keyboard_top:
+                        flags.append("under-keyboard")
                     handle = f"e{len(snap.elements) + 1}"
                     rid = node.get("resource-id", "")
                     snap.elements[handle] = Element(

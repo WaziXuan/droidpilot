@@ -10,6 +10,7 @@ def main() -> None:
     ap.add_argument("--grpc", help="emulator gRPC address, '' to disable (default 127.0.0.1:8554)")
     ap.add_argument("--min-interval-ms", type=int, help="minimum gap between actions (default 300)")
     ap.add_argument("--transport", default="stdio", choices=["stdio", "sse", "streamable-http"])
+    ap.add_argument("--port", type=int, default=8765, help="port for the HTTP transports (default 8765)")
     args = ap.parse_args()
 
     # The server reads its config from the environment at import time.
@@ -23,7 +24,10 @@ def main() -> None:
     logging.basicConfig(stream=sys.stderr, level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     from droidpilot.server import mcp
 
-    mcp.run(args.transport)
+    if args.transport == "stdio":
+        mcp.run("stdio")
+    else:
+        mcp.run(args.transport, port=args.port)
 
 
 if __name__ == "__main__":

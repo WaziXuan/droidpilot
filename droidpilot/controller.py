@@ -8,15 +8,30 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import time
+import xml.etree.ElementTree as ET
 
-from PIL import Image
+from PIL import Image, ImageChops, ImageStat
 
 from droidpilot import uitree
 from droidpilot.device import Device
 from droidpilot.emulator import Emulator
 
 log = logging.getLogger(__name__)
+
+_RESUMED = re.compile(r"ActivityRecord\{\S+ \S+ ([\w.]+)/([\w.$]+)")
+_THUMB_WIDTH = 108
+# Mean absolute grey-level difference (0-255) above which two thumbnails count as
+# different; a blinking text cursor stays well below it, a tap ripple does not.
+_FRAME_DIFF_THRESHOLD = 0.4
+# Friendly names for `input keyevent`; anything else is tried as KEYCODE_<NAME> or a number.
+_KEYS = {
+    "home": 3, "back": 4, "call": 5, "endcall": 6, "up": 19, "down": 20, "left": 21, "right": 22,
+    "center": 23, "volume_up": 24, "volume_down": 25, "power": 26, "camera": 27, "tab": 61,
+    "space": 62, "enter": 66, "delete": 67, "backspace": 67, "menu": 82, "search": 84,
+    "escape": 111, "forward_delete": 112, "recent": 187, "recents": 187, "app_switch": 187,
+}
 
 
 class TargetError(ValueError):
@@ -78,10 +93,62 @@ class Controller:
 
     # -- observation ------------------------------------------------------
 
-    def observe(self) -> uitree.Snapshot:
-        xml = self.device.call(lambda d: d.dump_hierarchy(compressed=True))
-        self.snapshot = uitree.parse(xml, self.screen)
+    def _dump(self) -> str:
+        return self.device.call(lambda d: d.dump_hierarchy(compressed=True))
+
+    def observe(self, xml: str | None = None) -> uitree.Snapshot:
+        self._last_xml = xml or self._dump()
+        self.snapshot = uitree.parse(self._last_xml, self.screen)
         return self.snapshot
+
+    def _thumb(self) -> Image.Image | None:
+        """Tiny greyscale frame for change detection (~8 ms over gRPC); None without gRPC."""
+        if not self.emu:
+            return None
+        return self.emu.screenshot(_THUMB_WIDTH).convert("L")
+
+    @staticmethod
+    def _frames_differ(a: Image.Image | None, b: Image.Image | None) -> bool:
+        if a is None or b is None or a.size != b.size:
+            return False
+        return ImageStat.Stat(ImageChops.difference(a, b)).mean[0] > _FRAME_DIFF_THRESHOLD
+
+    def mark(self) -> None:
+        """Record the pre-action state that `settle` compares against."""
+        self._before = (self._dump(), self._thumb())
+
+    def settle(self, max_wait_ms: int = 3000, quiet_ms: int = 400, stable_ms: int = 250,
+               poll_ms: int = 40) -> uitree.Snapshot:
+        """Wait for the screen to react to the last action and stop changing, then observe.
+
+        Each poll reads the UI tree (~30 ms) and, with gRPC, a tiny frame (~2 ms);
+        the frame catches ripples and transitions before the tree catches up.
+        Returns once the screen differs from the state recorded by `mark` and has
+        then been unchanged for `stable_ms` (long enough to ride out the brief
+        pause while a recreated screen reloads its content), or, if nothing changes
+        within `quiet_ms`, assumes the action had no visible effect. Gives up after
+        `max_wait_ms` (spinners, video, carousels never settle).
+        """
+        (before_xml, before_frame), self._before = getattr(self, "_before", (None, None)), (None, None)
+        start = time.monotonic()
+        last_xml, last_frame, still_since, changed = None, None, None, False
+        while True:
+            xml, frame = self._dump(), self._thumb()
+            now = time.monotonic()
+            elapsed = (now - start) * 1000
+            changed = changed or xml != before_xml or self._frames_differ(frame, before_frame)
+            if xml == last_xml and not self._frames_differ(frame, last_frame):
+                still_since = still_since or now
+            else:
+                still_since = None
+            if still_since and (now - still_since) * 1000 >= stable_ms and (changed or elapsed >= quiet_ms):
+                break
+            if elapsed >= max_wait_ms:
+                break
+            last_xml, last_frame = xml, frame
+            time.sleep(poll_ms / 1000)
+        self.last_settle_ms = round((time.monotonic() - start) * 1000)
+        return self.observe(xml)
 
     def screenshot(self, width: int = 540, quality: int = 70) -> bytes:
         if self.emu:
@@ -174,51 +241,98 @@ class Controller:
 
     # -- uiautomator2-only operations -------------------------------------
 
+    def find_text(self, text: str, exact: bool = False) -> uitree.Element | None:
+        """Best element in a fresh snapshot whose label matches `text` (case-insensitive)."""
+        needle = text.casefold()
+        best, best_rank = None, None
+        for el in self.observe().elements.values():
+            label = el.text.casefold()
+            if label == needle:
+                match = 0
+            elif not exact and needle in label:
+                match = 1
+            else:
+                continue
+            # Prefer exact matches, tappable elements, things not hidden by the keyboard, then smaller targets.
+            rank = (match, "click" not in el.flags, "under-keyboard" in el.flags,
+                    (el.bounds[2] - el.bounds[0]) * (el.bounds[3] - el.bounds[1]))
+            if best_rank is None or rank < best_rank:
+                best, best_rank = el, rank
+        return best
+
     def tap_text(self, text: str, exact: bool = False, timeout: float = 3) -> bool:
-        self.pacer.wait()
-        sel = {"text": text} if exact else {"textContains": text}
-
-        def click(d):
-            obj = d(**sel)
-            if not obj.wait(timeout=timeout):
-                obj = d(**({"description": text} if exact else {"descriptionContains": text}))
-                if not obj.exists:
-                    return False
-            obj.click()
-            return True
-
-        return self.device.call(click)
+        deadline = time.monotonic() + timeout
+        while (el := self.find_text(text, exact)) is None:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
+        self.tap(el.handle)
+        return True
 
     def type_text(self, text: str, clear: bool = False) -> None:
+        """Set the focused field's text via the accessibility API.
+
+        Unlike uiautomator2's send_keys this touches neither the clipboard (which
+        pops the system clipboard overlay on Android 13+) nor the user's input
+        method, works for any Unicode text, and still fires the app's text watchers.
+        """
+        root = ET.fromstring(self._dump())
+        field = next((n for n in root.iter("node") if n.get("focused") == "true"
+                      and n.get("class", "").endswith(("EditText", "AutoCompleteTextView"))), None)
+        if field is None:
+            raise TargetError("no focused text field; tap the field first")
+        current = field.get("text", "")
+        if clear or current == field.get("hint"):
+            current = ""
         self.pacer.wait()
-        self.device.call(lambda d: d.send_keys(text, clear=clear))
+        self.device.call(lambda d: d(focused=True).set_text(current + text))
 
     def press(self, key: str) -> None:
+        # uiautomator2's press() waits for the UI to idle and takes 0.1-1 s;
+        # a raw keyevent returns in ~50 ms and settle() does the waiting.
+        name = key.strip().lower()
+        code = _KEYS.get(name) or (name if name.isdigit() else "KEYCODE_" + name.upper())
         self.pacer.wait()
-        self.device.call(lambda d: d.press(key))
+        self.device.call(lambda d: d.shell(["input", "keyevent", str(code)]))
 
     def wait_for(self, text: str | None = None, resource_id: str | None = None,
-                 description: str | None = None, timeout: float = 5) -> bool:
-        sel = {}
-        if text:
-            sel["textContains"] = text
-        if resource_id:
-            sel["resourceIdMatches"] = f".*{resource_id}$"
-        if description:
-            sel["descriptionContains"] = description
-        if not sel:
-            raise TargetError("give text, resource_id or description")
-        return self.device.call(lambda d: d(**sel).wait(timeout=timeout))
+                 timeout: float = 5) -> bool:
+        """Poll until an element whose label contains `text` and/or whose resource id is `resource_id` appears.
+
+        Leaves the matching snapshot in self.snapshot, so its handles are usable.
+        """
+        if not (text or resource_id):
+            raise TargetError("give text or resource_id")
+        needle = text.casefold() if text else None
+        rid = resource_id.split(":id/", 1)[-1] if resource_id else None
+        deadline = time.monotonic() + timeout
+        while True:
+            for el in self.observe().elements.values():
+                if (needle is None or needle in el.text.casefold()) and (rid is None or el.resource_id == rid):
+                    return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(0.1)
 
     def app_launch(self, package: str) -> None:
         self.pacer.wait()
-        self.device.call(lambda d: d.app_start(package, wait=True))
+        # wait=True polls d.app_current(), which is slow; callers settle on the UI tree instead.
+        self.device.call(lambda d: d.app_start(package, wait=False))
 
     def app_stop(self, package: str) -> None:
         self.device.call(lambda d: d.app_stop(package))
 
     def app_current(self) -> dict:
-        return self.device.call(lambda d: d.app_current())
+        # uiautomator2's app_current() takes ~5 s on recent images; dumpsys takes ~35 ms.
+        out = self.device.call(lambda d: d.shell(
+            "dumpsys activity activities | grep -m1 -E 'topResumedActivity|mResumedActivity'").output)
+        m = _RESUMED.search(out)
+        if not m:
+            return {"package": None, "activity": None, "raw": out.strip()}
+        package, activity = m.groups()
+        if activity.startswith("."):
+            activity = package + activity
+        return {"package": package, "activity": activity}
 
     def app_list(self, contains: str = "") -> list[str]:
         pkgs = self.device.call(lambda d: d.app_list())
