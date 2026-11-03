@@ -29,13 +29,23 @@ _FRAME_DIFF_THRESHOLD = 0.4
 _KEYS = {
     "home": 3, "back": 4, "call": 5, "endcall": 6, "up": 19, "down": 20, "left": 21, "right": 22,
     "center": 23, "volume_up": 24, "volume_down": 25, "power": 26, "camera": 27, "tab": 61,
-    "space": 62, "enter": 66, "delete": 67, "backspace": 67, "menu": 82, "search": 84,
+    "space": 62, "enter": 66, "delete": 67, "backspace": 67, "menu": 82,
     "escape": 111, "forward_delete": 112, "recent": 187, "recents": 187, "app_switch": 187,
 }
+# Names that mean "submit what I typed". KEYCODE_SEARCH is deliberately absent:
+# it launches the Google app instead of submitting the focused field.
+_SUBMIT_KEYS = {"enter", "submit", "search", "go", "send", "done", "ime_action"}
 
 
 class TargetError(ValueError):
     pass
+
+
+def _focused_field(xml: str | None) -> ET.Element | None:
+    if not xml:
+        return None
+    return next((n for n in ET.fromstring(xml).iter("node") if n.get("focused") == "true"
+                 and n.get("class", "").endswith(("EditText", "AutoCompleteTextView"))), None)
 
 
 class Pacer:
@@ -134,9 +144,9 @@ class Controller:
         `max_wait_ms` (spinners, video, carousels never settle).
         """
         (before_xml, before_frame), self._before = getattr(self, "_before", (None, None)), (None, None)
-        use_frames = before_frame is not None
+        use_frames = self.emu is not None
         start = time.monotonic()
-        last, still_since, changed = None, None, False
+        last, still_since, changed, progress = None, None, False, None
         while True:
             if use_frames:
                 cur = self._thumb()
@@ -149,10 +159,20 @@ class Controller:
             now = time.monotonic()
             still_since = (still_since or now) if same else None
             elapsed = (now - start) * 1000
-            if still_since and (now - still_since) * 1000 >= stable_ms and (changed or elapsed >= quiet_ms):
-                break
             if elapsed >= max_wait_ms:
                 break
+            if still_since and (now - still_since) * 1000 >= stable_ms and (changed or elapsed >= quiet_ms):
+                # The screen looks still, but a page may still be loading behind a
+                # bar too thin to move the thumbnail. Keep waiting, like a person
+                # watching a spinner, while a bar is indeterminate or advancing.
+                snap = self.observe(cur if not use_frames else None)
+                bars = snap.progress
+                busy = snap.loading or (progress is not None and bars != progress) or \
+                    (progress is None and snap.partial_progress())
+                if not busy:
+                    self.last_settle_ms = round((time.monotonic() - start) * 1000)
+                    return snap
+                progress, still_since = bars, None
             last = cur
             time.sleep(poll_ms / 1000)
         self.last_settle_ms = round((time.monotonic() - start) * 1000)
@@ -284,21 +304,36 @@ class Controller:
         pops the system clipboard overlay on Android 13+) nor the user's input
         method, works for any Unicode text, and still fires the app's text watchers.
         """
-        root = ET.fromstring(self._dump())
-        field = next((n for n in root.iter("node") if n.get("focused") == "true"
-                      and n.get("class", "").endswith(("EditText", "AutoCompleteTextView"))), None)
+        # The tap that focused the field normally just returned a fresh tree, so
+        # look for the field's hint there; dumping again can block for ~0.5 s
+        # while the app is still reacting to that tap.
+        field = _focused_field(getattr(self, "_last_xml", None)) or _focused_field(self._dump())
         if field is None:
             raise TargetError("no focused text field; tap the field first")
-        current = field.get("text", "")
-        if clear or current == field.get("hint"):
-            current = ""
+        hint = field.get("hint")
+
+        def set_text(d):
+            el = d(focused=True)
+            current = el.info.get("text") or ""
+            if clear or current == hint:
+                current = ""
+            el.set_text(current + text)
+
         self.pacer.wait()
-        self.device.call(lambda d: d(focused=True).set_text(current + text))
+        self.device.call(set_text)
 
     def press(self, key: str) -> None:
+        name = key.strip().lower()
+        if name in _SUBMIT_KEYS:
+            # Like a person: press the keyboard's action key. Many fields (search
+            # boxes especially) ignore a hardware KEYCODE_ENTER.
+            action_key = self.observe().ime_action
+            if action_key is not None:
+                self.tap(action_key.handle)
+                return
+            name = "enter"
         # uiautomator2's press() waits for the UI to idle and takes 0.1-1 s;
         # a raw keyevent returns in ~50 ms and settle() does the waiting.
-        name = key.strip().lower()
         code = _KEYS.get(name) or (name if name.isdigit() else "KEYCODE_" + name.upper())
         self.pacer.wait()
         self.device.call(lambda d: d.shell(["input", "keyevent", str(code)]))

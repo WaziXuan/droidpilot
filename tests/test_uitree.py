@@ -6,7 +6,7 @@ SCREEN = (1080, 2400)
 def node(bounds, children="", **attrs):
     a = {"class": "android.view.View", "package": "com.example.app", "text": "", "content-desc": "",
          "resource-id": "", "clickable": "false", "scrollable": "false", "visible-to-user": "true"}
-    a.update({k.replace("_", "-"): v for k, v in attrs.items()})
+    a.update({k.rstrip("_").replace("_", "-"): v for k, v in attrs.items()})
     attr_s = " ".join(f'{k}="{v}"' for k, v in a.items())
     return f'<node {attr_s} bounds="{bounds}">{children}</node>'
 
@@ -72,6 +72,53 @@ def test_clickable_container_takes_child_labels_once():
                clickable="true")
     snap = uitree.parse(hierarchy(node("[0,0][1080,2400]", row)), SCREEN)
     assert [e.text for e in snap.elements.values()] == ["Wi-Fi | Connected"]
+
+
+def test_keyboard_action_key_is_the_only_key_listed():
+    ime_pkg = "com.google.android.inputmethod.latin"
+    keys = "".join(node(b, content_desc=label, clickable="true", package=ime_pkg) for label, b in [
+        ("q", "[5,1654][112,1808]"), ("Space", "[379,2118][807,2274]"),
+        ("Search", "[914,2118][1075,2274]"), ("Switch input method", "[829,2274][1012,2400]")])
+    keyboard = node("[0,1517][1080,2400]", keys, package=ime_pkg)
+    app = node("[0,0][1080,2400]", node("[0,200][1080,400]", class_="android.widget.EditText",
+                                        text="weather", clickable="true", focused="true"))
+    snap = uitree.parse(hierarchy(app, keyboard), SCREEN)
+    assert snap.ime_action is not None and snap.ime_action.text == "Search"
+    assert snap.ime_action.center == (994, 2196)
+    assert [e.text for e in snap.elements.values()] == ["weather", "Search"]
+    assert "ime-action" in snap.ime_action.flags
+
+
+def test_repeated_child_labels_are_merged():
+    row = node("[0,400][1080,600]", node("[40,420][800,480]", text="0") + node("[900,420][1000,480]", content_desc="0"),
+               clickable="true")
+    snap = uitree.parse(hierarchy(node("[0,0][1080,2400]", row)), SCREEN)
+    assert [e.text for e in snap.elements.values()] == ["0"]
+
+
+def test_progress_bars_mark_loading_only_when_indeterminate():
+    page_bar = node("[0,278][1080,283]", class_="android.widget.ProgressBar")
+    gauge = node("[63,830][1038,872]", class_="android.widget.ProgressBar", text="40.0")
+    loading = uitree.parse(hierarchy(node("[0,0][1080,2400]", page_bar + gauge)), SCREEN)
+    assert loading.loading and "loading" in loading.render()
+    static = uitree.parse(hierarchy(node("[0,0][1080,2400]", gauge)), SCREEN)
+    assert not static.loading and static.partial_progress()
+
+
+def test_page_sized_click_targets_do_not_swallow_their_content():
+    page = node("[0,280][1080,2400]",
+                node("[40,400][300,460]", text="China", clickable="true")
+                + node("[40,500][1000,560]", text="Some paragraph"),
+                clickable="true")
+    snap = uitree.parse(hierarchy(node("[0,0][1080,2400]", page)), SCREEN)
+    assert [e.text for e in snap.elements.values()] == ["China", "Some paragraph"]
+
+
+def test_nested_wrappers_with_same_label_and_box_are_listed_once():
+    inner = node("[960,700][1070,830]", content_desc="Download PDF", clickable="true")
+    outer = node("[960,700][1070,830]", inner, content_desc="Download PDF", clickable="true")
+    snap = uitree.parse(hierarchy(node("[0,0][1080,2400]", outer)), SCREEN)
+    assert [e.text for e in snap.elements.values()] == ["Download PDF"]
 
 
 def test_handles_are_sequential_and_lines_render():

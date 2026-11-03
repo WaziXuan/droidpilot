@@ -15,6 +15,12 @@ _LABEL_MAX = 60
 _SYSTEMUI = "com.android.systemui"
 _STATUS_BAR = "com.android.systemui:id/status_bar_container"
 _MIN_TARGET_PX = 24
+_PAGE_FRACTION = 0.5  # clickable containers bigger than this share of the screen get no aggregated label
+# Labels keyboards give their editor-action key (Gboard, in English and Chinese UIs).
+_IME_ACTION_LABELS = {
+    "enter", "return", "search", "go", "send", "done", "next", "previous",
+    "搜索", "搜尋", "发送", "傳送", "前往", "完成", "下一步", "下一个", "確定", "确定", "换行", "換行",
+}
 
 
 @dataclass
@@ -50,9 +56,29 @@ class Snapshot:
     package: str
     keyboard_top: int | None = None  # y where the on-screen keyboard starts, if shown
     elements: dict[str, Element] = field(default_factory=dict)
+    ime_action: Element | None = None  # the keyboard's Enter/Search/Go/Send key, if exposed
+    # Visible progress bars as (bounds, value text). Indeterminate ones (spinners,
+    # browser page-load bars) report no value; static gauges (storage, battery) do.
+    progress: list[tuple[tuple[int, int, int, int], str]] = field(default_factory=list)
+
+    @property
+    def loading(self) -> bool:
+        return any(value == "" for _, value in self.progress)
+
+    def partial_progress(self) -> bool:
+        """A determinate bar below 100%: may be a moving download/page bar or a static gauge."""
+        for _, value in self.progress:
+            try:
+                if float(value) < 100:
+                    return True
+            except ValueError:
+                pass
+        return False
 
     def render(self) -> str:
         head = f"package: {self.package}  elements: {len(self.elements)}"
+        if self.loading:
+            head += "  loading"
         if self.keyboard_top is not None:
             head += f"  keyboard: shown (covers y>={self.keyboard_top})"
         return "\n".join([head, *(e.line() for e in self.elements.values())])
@@ -73,7 +99,7 @@ def _own_label(node: ET.Element) -> str:
 def _descendant_label(node: ET.Element) -> str:
     texts = []
     for child in node.iter():
-        if child is not node and (t := _own_label(child)):
+        if child is not node and (t := _own_label(child)) and t not in texts:
             texts.append(t)
     return " | ".join(texts)
 
@@ -122,6 +148,21 @@ def _intersect(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> tu
     return max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
 
 
+def _box_area(b: tuple[int, int, int, int]) -> int:
+    return max(0, b[2] - b[0]) * max(0, b[3] - b[1])
+
+
+def _duplicate(snap: "Snapshot", label: str, b: tuple[int, int, int, int]) -> bool:
+    """Nested clickable wrappers (frequent in web content) repeat their child's label and box."""
+    label = _truncate(label)
+    for el in snap.elements.values():
+        if el.text == label:
+            overlap = _box_area(_intersect(el.bounds, b))
+            if overlap >= 0.9 * max(_box_area(el.bounds), _box_area(b)):
+                return True
+    return False
+
+
 def _area(node: ET.Element) -> int:
     b = _bounds(node)
     return (b[2] - b[0]) * (b[3] - b[1]) if b else 0
@@ -151,6 +192,9 @@ def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
         if b and clip and not _center_in(b, clip):
             # Scrolled out of its container, e.g. under a collapsing toolbar: a tap there hits something else.
             b = None
+        if b and node.get("class", "").endswith("ProgressBar"):
+            # Recorded before the size filter: page-load bars are a few px tall.
+            snap.progress.append((b, node.get("text", "")))
         if b and min(b[2] - b[0], b[3] - b[1]) < _MIN_TARGET_PX:
             b = None  # slivers at the edge of a scrolled list; not reliably tappable
         if b:
@@ -160,9 +204,14 @@ def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
             interactive = _interactive(flags)
             label = _own_label(node)
             if interactive and not label and "scroll" not in flags:
-                label = _descendant_label(node)
-                covered.update(id(c) for c in node.iter() if c is not node and not _interactive(_flags(c)))
-            if interactive or (label and id(node) not in covered):
+                if screen and _box_area(b) > _PAGE_FRACTION * screen[0] * screen[1]:
+                    # A page-sized click target (common at the root of web pages) says nothing
+                    # useful; list its children individually instead.
+                    interactive = False
+                else:
+                    label = _descendant_label(node)
+                    covered.update(id(c) for c in node.iter() if c is not node and not _interactive(_flags(c)))
+            if (interactive or (label and id(node) not in covered)) and not _duplicate(snap, label, b):
                 if snap.keyboard_top is not None and (b[1] + b[3]) // 2 >= snap.keyboard_top:
                     flags.append("under-keyboard")
                 handle = f"e{len(snap.elements) + 1}"
@@ -179,4 +228,19 @@ def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
             visit(child, clip)
 
     visit(root, (0, 0, *screen) if screen else None)
+
+    # Of the keyboard, list only its action key: it is what submits a search or
+    # message, and apps often ignore a plain KEYCODE_ENTER.
+    if ime is not None and (key := _ime_action_key(ime)) is not None:
+        handle = f"e{len(snap.elements) + 1}"
+        snap.ime_action = Element(handle=handle, cls="Key", text=_own_label(key), resource_id="",
+                                  bounds=_bounds(key), flags=["click", "ime-action"])
+        snap.elements[handle] = snap.ime_action
     return snap
+
+
+def _ime_action_key(ime: ET.Element) -> ET.Element | None:
+    keys = [n for n in ime.iter("node") if n.get("clickable") == "true" and _bounds(n)
+            and _own_label(n).casefold() in _IME_ACTION_LABELS]
+    # The action key sits at the right end of the bottom row of keys.
+    return max(keys, key=lambda n: (_bounds(n)[3], _bounds(n)[2]), default=None)

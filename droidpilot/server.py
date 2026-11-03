@@ -110,7 +110,9 @@ def type_text(text: str, clear: bool = False, observe_after: bool = True, max_wa
 
 @mcp.tool()
 def press_key(key: str, observe_after: bool = True, max_wait_ms: int = 3000) -> str:
-    """Press a key: back, home, enter, recent, delete, search, volume_up, volume_down, power, ..."""
+    """Press a key: back, home, recent, delete, tab, volume_up, volume_down, power, or any KEYCODE_ name.
+    "enter" (also "search"/"go"/"send"/"done") presses the on-screen keyboard's action key when the
+    keyboard is shown, which is what submits most search boxes and chat inputs."""
     return _act(lambda: ctl.press(key), observe_after, max_wait_ms)
 
 
@@ -125,6 +127,14 @@ def wait_for(text: str | None = None, resource_id: str | None = None, timeout: f
         raise ToolError(str(e)) from e
     note = "found" if found else f"not found after {timeout}s"
     return f"{note}\n{ctl.snapshot.render()}" if observe_after else note
+
+
+@mcp.tool()
+def wait_idle(max_wait_ms: int = 8000) -> str:
+    """Wait until the screen stops changing and nothing is loading (use when the element list says
+    `loading`, e.g. a web page still coming in), then return the element list."""
+    snap = ctl.settle(max_wait_ms, quiet_ms=0)
+    return f"ok (idle after {ctl.last_settle_ms} ms)\n{snap.render()}"
 
 
 @mcp.tool()
