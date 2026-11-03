@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 
+import grpc
 from mcp.server.mcpserver import Image, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
@@ -17,8 +18,15 @@ Drive an Android device. Call `observe` first: it lists on-screen elements as
 `[eN] Class "label" #resource-id @(x,y) WxH flags`. Pass a handle like "e7" (valid
 only for the latest element list) or "x,y" device pixels to action tools. Action
 tools wait until the screen stops changing and return the updated element list,
-so you rarely need a separate observe. Use `screenshot` only when the element
-list is not enough (images, canvas, games, web content without accessibility info).
+so you rarely need a separate observe.
+
+The header line says `loading` while a spinner or page-load bar is visible (call
+`wait_idle`), and `keyboard: shown` when the on-screen keyboard covers the lower
+screen; elements behind it are flagged `under-keyboard`. The keyboard's action
+key (Search/Go/Send/Enter) is listed as a `Key` element; `press_key enter` taps it.
+Lists scroll by ~60% of their height so consecutive pages overlap.
+Use `screenshot` only when the element list is not enough (images, canvas, games,
+web content without accessibility info).
 """
 
 ctl = Controller(
@@ -40,6 +48,9 @@ def _act(action, observe_after: bool, max_wait_ms: int, quiet_ms: int = 400) -> 
         failure = action()
     except TargetError as e:
         raise ToolError(str(e)) from e
+    except grpc.RpcError as e:
+        raise ToolError(f"emulator gRPC call failed ({e.code().name}); is the emulator still running "
+                        f"with -grpc?") from e
     if failure:
         return failure
     if not observe_after:

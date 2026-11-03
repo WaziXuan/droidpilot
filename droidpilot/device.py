@@ -5,8 +5,13 @@ import logging
 import threading
 
 import uiautomator2 as u2
+from uiautomator2 import exceptions as u2e
 
 log = logging.getLogger(__name__)
+
+# Failures that mean the transport or the on-device server is gone, not that the request was wrong.
+_SERVER_ERRORS = (u2e.DeviceError, u2e.SessionBrokenError, u2e.RPCUnknownError, u2e.HierarchyEmptyError,
+                  ConnectionError, TimeoutError)
 
 
 class Device:
@@ -44,10 +49,14 @@ class Device:
             self._d = None
 
     def call(self, fn):
-        """Run fn(u2_device); on failure restart the on-device server and retry once."""
+        """Run fn(u2_device); if the connection or on-device server broke, restart it and retry once.
+
+        Errors about the request itself (element not found, unknown app) are
+        raised as-is: restarting the server would not help and costs seconds.
+        """
         try:
             return fn(self.u2)
-        except Exception as e:
-            log.warning("uiautomator2 call failed (%s); reconnecting", e)
+        except _SERVER_ERRORS as e:
+            log.warning("uiautomator2 connection failed (%s); restarting it", e)
             self.reset()
             return fn(self.u2)

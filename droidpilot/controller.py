@@ -13,6 +13,7 @@ import time
 import xml.etree.ElementTree as ET
 
 from PIL import Image, ImageChops, ImageStat
+from uiautomator2.exceptions import UiObjectNotFoundError
 
 from droidpilot import uitree
 from droidpilot.device import Device
@@ -25,6 +26,8 @@ _THUMB_WIDTH = 108
 # Mean absolute grey-level difference (0-255) above which two thumbnails count as
 # different; a blinking text cursor stays well below it, a tap ripple does not.
 _FRAME_DIFF_THRESHOLD = 0.4
+# Half-size of the box treated as "the touched element" when tapping raw coordinates.
+_TOUCH_BOX = 100
 # Friendly names for `input keyevent`; anything else is tried as KEYCODE_<NAME> or a number.
 _KEYS = {
     "home": 3, "back": 4, "call": 5, "endcall": 6, "up": 19, "down": 20, "left": 21, "right": 22,
@@ -118,18 +121,36 @@ class Controller:
         return self.emu.screenshot(_THUMB_WIDTH).convert("L")
 
     @staticmethod
-    def _frames_differ(a: Image.Image | None, b: Image.Image | None) -> bool:
+    def _frames_differ(a: Image.Image | None, b: Image.Image | None,
+                       ignore: tuple[int, int, int, int] | None = None) -> bool:
+        """True if two thumbnails differ, optionally ignoring a box given in thumbnail pixels."""
         if a is None or b is None or a.size != b.size:
             return False
+        if ignore:
+            a, b = a.copy(), b.copy()
+            a.paste(0, ignore)
+            b.paste(0, ignore)
         return ImageStat.Stat(ImageChops.difference(a, b)).mean[0] > _FRAME_DIFF_THRESHOLD
 
     def mark(self) -> None:
         """Record the pre-action state that `settle` compares against (a frame with gRPC, else the tree)."""
         frame = self._thumb()
         self._before = (None if frame is not None else self._dump(), frame)
+        self._touched = None
+
+    def _touch(self, x: int, y: int, target: str) -> None:
+        """Remember what a tap/press hit, so settle can tell its ripple from the real response."""
+        bounds = self.element_bounds(target) if "," not in target else None
+        self._touched = bounds or (x - _TOUCH_BOX, y - _TOUCH_BOX, x + _TOUCH_BOX, y + _TOUCH_BOX)
+
+    def _thumb_box(self, box: tuple[int, int, int, int] | None) -> tuple[int, int, int, int] | None:
+        if box is None:
+            return None
+        scale = _THUMB_WIDTH / self.screen[0]
+        return tuple(round(v * scale) for v in box)
 
     def settle(self, max_wait_ms: int = 3000, quiet_ms: int = 400, stable_ms: int = 250,
-               poll_ms: int = 30) -> uitree.Snapshot:
+               poll_ms: int = 30, local_quiet_ms: int = 1000) -> uitree.Snapshot:
         """Wait for the screen to react to the last action and stop changing, then observe.
 
         With gRPC this polls tiny frames (~2 ms each) and reads the UI tree once at
@@ -142,15 +163,23 @@ class Controller:
         pause while a recreated screen reloads its content), or, if nothing changes
         within `quiet_ms`, assumes the action had no visible effect. Gives up after
         `max_wait_ms` (spinners, video, carousels never settle).
+
+        After a tap, changes inside the touched element (ripple, pressed state)
+        do not count as the response: a cold-started screen can sit still for
+        ~0.4 s between the ripple and its transition. If only the touched element
+        changed, wait up to `local_quiet_ms` for something else to happen.
         """
         (before_xml, before_frame), self._before = getattr(self, "_before", (None, None)), (None, None)
+        touched, self._touched = self._thumb_box(getattr(self, "_touched", None)), None
         use_frames = self.emu is not None
         start = time.monotonic()
-        last, still_since, changed, progress = None, None, False, None
+        last, still_since, changed, local, progress = None, None, False, False, None
         while True:
             if use_frames:
                 cur = self._thumb()
-                changed = changed or self._frames_differ(cur, before_frame)
+                if not changed and self._frames_differ(cur, before_frame):
+                    local = True
+                    changed = not touched or self._frames_differ(cur, before_frame, ignore=touched)
                 same = last is not None and not self._frames_differ(cur, last)
             else:
                 cur = self._dump()
@@ -161,7 +190,8 @@ class Controller:
             elapsed = (now - start) * 1000
             if elapsed >= max_wait_ms:
                 break
-            if still_since and (now - still_since) * 1000 >= stable_ms and (changed or elapsed >= quiet_ms):
+            quiet = max(quiet_ms, local_quiet_ms) if local else quiet_ms
+            if still_since and (now - still_since) * 1000 >= stable_ms and (changed or elapsed >= quiet):
                 # The screen looks still, but a page may still be loading behind a
                 # bar too thin to move the thumbnail. Keep waiting, like a person
                 # watching a spinner, while a bar is indeterminate or advancing.
@@ -169,7 +199,9 @@ class Controller:
                 bars = snap.progress
                 busy = snap.loading or (progress is not None and bars != progress) or \
                     (progress is None and snap.partial_progress())
-                if not busy:
+                # The dump itself can take a while; if the screen moved meanwhile, the tree may be stale.
+                moved = use_frames and self._frames_differ(self._thumb(), cur)
+                if not busy and not moved:
                     self.last_settle_ms = round((time.monotonic() - start) * 1000)
                     return snap
                 progress, still_since = bars, None
@@ -215,6 +247,7 @@ class Controller:
 
     def tap(self, target: str) -> None:
         x, y = self.resolve(target)
+        self._touch(x, y, target)
         self.pacer.wait()
         if self.emu:
             self.emu.tap(x, y)
@@ -223,6 +256,7 @@ class Controller:
 
     def long_press(self, target: str, hold_ms: int = 800) -> None:
         x, y = self.resolve(target)
+        self._touch(x, y, target)
         self.pacer.wait()
         if self.emu:
             self.emu.long_press(x, y, hold_ms)
@@ -281,7 +315,9 @@ class Controller:
         best, best_rank = None, None
         for el in self.observe().elements.values():
             label = el.text.casefold()
-            if label == needle:
+            # A row's label joins its texts ("Apps | Assistant, recent apps"); a person reading
+            # "Apps" there would call it an exact match.
+            if label == needle or needle in label.split(" | "):
                 match = 0
             elif not exact and needle in label:
                 match = 1
@@ -326,7 +362,10 @@ class Controller:
             el.set_text(current + text)
 
         self.pacer.wait()
-        self.device.call(set_text)
+        try:
+            self.device.call(set_text)
+        except UiObjectNotFoundError:
+            raise TargetError("the text field lost focus; tap it again") from None
 
     def press(self, key: str) -> None:
         name = key.strip().lower()

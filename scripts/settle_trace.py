@@ -1,8 +1,9 @@
-"""Trace what keeps changing after an action, to tune settle().
+"""Trace how the screen changes after a tap, to tune settle().
 
-Usage: python scripts/settle_trace.py "x,y" [seconds]
-Taps the point, then logs every poll: elapsed ms, whether the UI tree changed,
-the thumbnail difference from the previous poll, and the element count.
+Usage: python scripts/settle_trace.py "x,y" [seconds] [--tree]
+Taps the point, then every ~30 ms logs elapsed time and the thumbnail difference
+from the previous poll and from the pre-tap frame. With --tree it also dumps the
+UI tree each poll (slow while the app animates, which is itself informative).
 """
 import hashlib
 import sys
@@ -13,23 +14,30 @@ from PIL import ImageChops, ImageStat
 from droidpilot.controller import Controller
 
 
+def diff(a, b):
+    return ImageStat.Stat(ImageChops.difference(a, b)).mean[0]
+
+
 def main():
-    target = sys.argv[1]
-    seconds = float(sys.argv[2]) if len(sys.argv) > 2 else 3
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    target, seconds = args[0], float(args[1]) if len(args) > 1 else 3
+    with_tree = "--tree" in sys.argv
     ctl = Controller()
     ctl.observe()
+    before = ctl._thumb()
     ctl.tap(target)
     start = time.monotonic()
-    last_xml, last_frame = None, None
+    last = before
     while time.monotonic() - start < seconds:
-        xml, frame = ctl._dump(), ctl._thumb()
-        diff = ImageStat.Stat(ImageChops.difference(frame, last_frame)).mean[0] if last_frame else 0
-        n = len(ctl.observe(xml).elements)
-        h = hashlib.md5(xml.encode()).hexdigest()[:6]
-        print(f"{(time.monotonic() - start) * 1000:6.0f} ms  tree {h} {'CHANGED' if xml != last_xml else '       '}"
-              f"  frame diff {diff:5.2f}  elements {n}")
-        last_xml, last_frame = xml, frame
-        time.sleep(0.04)
+        frame = ctl._thumb()
+        line = (f"{(time.monotonic() - start) * 1000:6.0f} ms  vs prev {diff(frame, last):5.2f}"
+                f"  vs before {diff(frame, before):5.2f}")
+        if with_tree:
+            xml = ctl._dump()
+            line += f"  tree {hashlib.md5(xml.encode()).hexdigest()[:6]} {ctl.observe(xml).package}"
+        print(line)
+        last = frame
+        time.sleep(0.03)
 
 
 if __name__ == "__main__":
