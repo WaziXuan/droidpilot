@@ -22,6 +22,7 @@ from droidpilot.emulator import Emulator
 log = logging.getLogger(__name__)
 
 _RESUMED = re.compile(r"ActivityRecord\{\S+ \S+ ([\w.]+)/([\w.$]+)")
+_ROTATION = re.compile(r'<hierarchy[^>]*\brotation="(\d)"')
 _THUMB_WIDTH = 108
 # Mean absolute grey-level difference (0-255) above which two thumbnails count as
 # different; a blinking text cursor stays well below it, a tap ripple does not.
@@ -77,7 +78,8 @@ class Controller:
         self._emu_checked = False
         self.pacer = Pacer(min_interval_ms)
         self.snapshot: uitree.Snapshot | None = None
-        self._screen: tuple[int, int] | None = None
+        self._natural: tuple[int, int] | None = None
+        self.rotation = 0  # Surface.ROTATION_* as of the latest UI dump
 
     # -- backends ---------------------------------------------------------
 
@@ -91,16 +93,37 @@ class Controller:
         return self._emu
 
     @property
+    def natural(self) -> tuple[int, int]:
+        """Display size in its unrotated orientation."""
+        if self._natural is None:
+            if self.emu:
+                self._natural = self.emu.natural_size
+            else:
+                def read(d):
+                    w, h = d.window_size()
+                    return (h, w) if d.info.get("displayRotation", 0) % 2 else (w, h)
+                self._natural = self.device.call(read)
+        return self._natural
+
+    @property
     def screen(self) -> tuple[int, int]:
-        if self._screen is None:
-            self._screen = self.device.call(lambda d: d.window_size())
-        return self._screen
+        """Display size as currently rotated, i.e. the space element bounds and tap targets live in."""
+        w, h = self.natural
+        return (h, w) if self.rotation % 2 else (w, h)
+
+    def _set_rotation(self, xml: str) -> None:
+        m = _ROTATION.search(xml)
+        self.rotation = int(m.group(1)) % 4 if m else 0
+        if self.emu:
+            self.emu.rotation = self.rotation
 
     def backends(self) -> dict:
+        self.observe()  # refresh rotation
         return {
             "uiautomator2": self.device.serial or "auto",
             "emulator_grpc": self.emu.address if self.emu else None,
             "screen": self.screen,
+            "rotation": self.rotation,
             "min_interval_ms": round(self.pacer.min_interval * 1000),
         }
 
@@ -111,6 +134,7 @@ class Controller:
 
     def observe(self, xml: str | None = None) -> uitree.Snapshot:
         self._last_xml = xml or self._dump()
+        self._set_rotation(self._last_xml)
         self.snapshot = uitree.parse(self._last_xml, self.screen)
         return self.snapshot
 
@@ -124,8 +148,10 @@ class Controller:
     def _frames_differ(a: Image.Image | None, b: Image.Image | None,
                        ignore: tuple[int, int, int, int] | None = None) -> bool:
         """True if two thumbnails differ, optionally ignoring a box given in thumbnail pixels."""
-        if a is None or b is None or a.size != b.size:
+        if a is None or b is None:
             return False
+        if a.size != b.size:
+            return True  # the display rotated
         if ignore:
             a, b = a.copy(), b.copy()
             a.paste(0, ignore)
@@ -150,7 +176,8 @@ class Controller:
         return tuple(round(v * scale) for v in box)
 
     def settle(self, max_wait_ms: int = 3000, quiet_ms: int = 400, stable_ms: int = 250,
-               poll_ms: int = 30, local_quiet_ms: int = 1000) -> uitree.Snapshot:
+               poll_ms: int = 30, local_quiet_ms: int = 1000,
+               loading_grace_ms: int | None = 2000) -> uitree.Snapshot:
         """Wait for the screen to react to the last action and stop changing, then observe.
 
         With gRPC this polls tiny frames (~2 ms each) and reads the UI tree once at
@@ -168,12 +195,16 @@ class Controller:
         do not count as the response: a cold-started screen can sit still for
         ~0.4 s between the ripple and its transition. If only the touched element
         changed, wait up to `local_quiet_ms` for something else to happen.
+
+        A visible loading bar is waited out for at most `loading_grace_ms` once the
+        picture is still (None: until max_wait_ms); pages often keep a bar up for a
+        resource that never arrives, and the `loading` flag tells the agent anyway.
         """
         (before_xml, before_frame), self._before = getattr(self, "_before", (None, None)), (None, None)
         touched, self._touched = self._thumb_box(getattr(self, "_touched", None)), None
         use_frames = self.emu is not None
         start = time.monotonic()
-        last, still_since, changed, local, progress = None, None, False, False, None
+        last, still_since, changed, local, progress, busy_since = None, None, False, False, None, None
         while True:
             if use_frames:
                 cur = self._thumb()
@@ -201,6 +232,10 @@ class Controller:
                     (progress is None and snap.partial_progress())
                 # The dump itself can take a while; if the screen moved meanwhile, the tree may be stale.
                 moved = use_frames and self._frames_differ(self._thumb(), cur)
+                if busy and not moved:
+                    busy_since = busy_since or now
+                    if loading_grace_ms is not None and (now - busy_since) * 1000 >= loading_grace_ms:
+                        busy = False  # picture is done; report `loading` instead of waiting on
                 if not busy and not moved:
                     self.last_settle_ms = round((time.monotonic() - start) * 1000)
                     return snap
@@ -225,14 +260,14 @@ class Controller:
     def resolve(self, target: str) -> tuple[int, int]:
         """Accepts an element handle from the latest observe ("e7") or "x,y" in device pixels."""
         target = target.strip()
+        if self.snapshot is None:
+            self.observe()  # learn the rotation before interpreting coordinates
         if "," in target:
             try:
                 x, y = (int(float(v)) for v in target.split(","))
             except ValueError:
                 raise TargetError(f"bad coordinates {target!r}; expected 'x,y'") from None
             return x, y
-        if self.snapshot is None:
-            raise TargetError("no snapshot yet; call observe first")
         el = self.snapshot.elements.get(target)
         if el is None:
             raise TargetError(f"unknown handle {target!r}; handles come from the latest observe")

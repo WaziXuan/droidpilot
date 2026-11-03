@@ -146,7 +146,7 @@ def wait_for(text: str | None = None, resource_id: str | None = None, timeout: f
 def wait_idle(max_wait_ms: int = 8000) -> str:
     """Wait until the screen stops changing and nothing is loading (use when the element list says
     `loading`, e.g. a web page still coming in), then return the element list."""
-    snap = ctl.settle(max_wait_ms, quiet_ms=0)
+    snap = ctl.settle(max_wait_ms, quiet_ms=0, loading_grace_ms=None)
     return f"ok (idle after {ctl.last_settle_ms} ms)\n{snap.render()}"
 
 

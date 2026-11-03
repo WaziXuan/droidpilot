@@ -54,6 +54,7 @@ class Element:
 @dataclass
 class Snapshot:
     package: str
+    rotation: int = 0  # Surface.ROTATION_*; odd values are landscape
     keyboard_top: int | None = None  # y where the on-screen keyboard starts, if shown
     elements: dict[str, Element] = field(default_factory=dict)
     ime_action: Element | None = None  # the keyboard's Enter/Search/Go/Send key, if exposed
@@ -77,6 +78,8 @@ class Snapshot:
 
     def render(self) -> str:
         head = f"package: {self.package}  elements: {len(self.elements)}"
+        if self.rotation % 2:
+            head += "  orientation: landscape"
         if self.loading:
             head += "  loading"
         if self.keyboard_top is not None:
@@ -158,7 +161,7 @@ def _duplicate(snap: "Snapshot", label: str, b: tuple[int, int, int, int]) -> bo
     for el in snap.elements.values():
         if el.text == label:
             overlap = _box_area(_intersect(el.bounds, b))
-            if overlap >= 0.9 * max(_box_area(el.bounds), _box_area(b)):
+            if overlap >= 0.85 * max(_box_area(el.bounds), _box_area(b)):
                 return True
     return False
 
@@ -179,6 +182,10 @@ def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
     apps = [w for w in windows if w.get("package") != _SYSTEMUI and not _is_ime(w)]
     main = max(apps or windows, key=_area, default=None)
     snap = Snapshot(package=main.get("package", "?") if main is not None else "?")
+    try:
+        snap.rotation = int(root.get("rotation", "0")) % 4
+    except ValueError:
+        pass
     ime = next((w for w in windows if _is_ime(w) and _bounds(w)), None)
     if ime is not None:
         snap.keyboard_top = _bounds(ime)[1]

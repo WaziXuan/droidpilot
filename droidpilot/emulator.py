@@ -3,6 +3,10 @@
 Used for the two things it does faster than anything running inside the guest:
 grabbing frames straight from the emulator's framebuffer, and injecting touch
 input (including multi-touch) as virtual touchscreen events.
+
+Both work in the display's natural (unrotated) orientation, while uiautomator
+reports coordinates for the current rotation. This class takes and returns
+display coordinates and does the conversion using `rotation`.
 """
 from __future__ import annotations
 
@@ -20,6 +24,21 @@ _DOWN_PRESSURE = 1
 _FRAME_INTERVAL_S = 1 / 60
 
 
+def to_natural(x: float, y: float, rotation: int, natural: tuple[int, int]) -> tuple[float, float]:
+    """Map a point from display coordinates (what uiautomator reports for the current
+    rotation) to the emulator's natural, unrotated coordinates (what gRPC frames and
+    touch events use). `rotation` is Android's Surface.ROTATION_* (0-3)."""
+    w, h = natural
+    rotation %= 4
+    if rotation == 1:
+        return w - 1 - y, x
+    if rotation == 2:
+        return w - 1 - x, h - 1 - y
+    if rotation == 3:
+        return y, h - 1 - x
+    return x, y
+
+
 class Emulator:
     def __init__(self, address: str = "127.0.0.1:8554"):
         self.address = address
@@ -27,7 +46,9 @@ class Emulator:
             address, options=[("grpc.max_receive_message_length", 64 << 20)]
         )
         self._stub = pb_grpc.EmulatorControllerStub(self._channel)
-        self._size: tuple[int, int] | None = None
+        self._natural: tuple[int, int] | None = None
+        # Current display rotation (Surface.ROTATION_*); the controller updates it from each UI dump.
+        self.rotation = 0
 
     def available(self, timeout: float = 1.0) -> bool:
         try:
@@ -37,32 +58,34 @@ class Emulator:
             return False
 
     @property
-    def size(self) -> tuple[int, int]:
-        """Display size in device pixels (portrait orientation as reported by the emulator)."""
-        if self._size is None:
-            self.screenshot()
-        return self._size
+    def natural_size(self) -> tuple[int, int]:
+        """Display size in its natural (unrotated) orientation; gRPC frames always come this way up."""
+        if self._natural is None:
+            img = self._stub.getScreenshot(pb.ImageFormat(format=pb.ImageFormat.RGB888))
+            self._natural = (img.format.width, img.format.height)
+        return self._natural
 
     def screenshot(self, width: int | None = None) -> Image.Image:
+        """Frame turned to match the current rotation, scaled to `width` px wide if given."""
+        nw, nh = self.natural_size
         fmt = pb.ImageFormat(format=pb.ImageFormat.RGB888)
-        if width and self._size:
-            w, h = self._size
-            fmt.width, fmt.height = width, round(h * width / w)
+        if width:
+            display_w = nh if self.rotation % 2 else nw
+            scale = width / display_w
+            fmt.width, fmt.height = round(nw * scale), round(nh * scale)
         img = self._stub.getScreenshot(fmt)
-        size = (img.format.width, img.format.height)
-        if not width:
-            self._size = size
-        frame = Image.frombytes("RGB", size, img.image)
-        if width and self._size is None:
-            # First call asked for a scaled frame before we knew the display size.
-            self._size = size
-            frame = frame.resize((width, round(size[1] * width / size[0])))
-        return frame
+        frame = Image.frombytes("RGB", (img.format.width, img.format.height), img.image)
+        # PIL rotates counter-clockwise; turning the natural frame by 90° per rotation step
+        # matches what the user sees (verified against uiautomator2 screenshots for 1 and 3).
+        return frame.rotate(90 * self.rotation, expand=True) if self.rotation % 4 else frame
 
     def _send(self, touches: list[tuple[int, int, int, int]]) -> None:
+        natural = self.natural_size
+        points = [(*to_natural(x, y, self.rotation, natural), ident, pressure)
+                  for x, y, ident, pressure in touches]
         self._stub.sendTouch(pb.TouchEvent(touches=[
             pb.Touch(x=int(x), y=int(y), identifier=ident, pressure=pressure)
-            for x, y, ident, pressure in touches
+            for x, y, ident, pressure in points
         ]))
 
     def tap(self, x: int, y: int, hold_ms: int = 50) -> None:

@@ -103,11 +103,18 @@ Measured on an x86_64 Android 14 emulator (software rendering) on a Ryzen 7 7800
   Google app.
 - **Scrolling** pauses the finger before lifting so lists move by the requested distance instead of
   flinging past items.
+- **Rotation.** uiautomator reports coordinates for the current rotation, while gRPC frames and touch
+  events stay in the display's natural orientation. The rotation is read from every hierarchy dump
+  (no extra call); frames are turned upright before they are compared or returned, and every touch
+  point is mapped back to natural coordinates. Verified for all four rotations against the frame
+  rotation in tests, and on the emulator in both landscape directions.
+- **Loading bars** are waited out for at most 2 s once the picture is still (pages often keep a bar
+  up for a resource that never arrives); the element list still says `loading`, and `wait_idle`
+  waits for as long as you allow.
 - **Pacing.** A minimum gap between actions (300 ms) keeps taps from landing on half-drawn screens.
 
 ## Limitations
 
-- Portrait orientation only for now.
 - Content without accessibility information (games, canvas, some WebViews) needs `screenshot`.
 - The gRPC endpoint is unauthenticated on localhost; don't expose it.
 
