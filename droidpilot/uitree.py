@@ -31,17 +31,19 @@ class Element:
     resource_id: str
     bounds: tuple[int, int, int, int]
     flags: list[str]
+    full_text: str = ""  # the label before truncation (whitespace collapsed)
 
     @property
     def center(self) -> tuple[int, int]:
         x1, y1, x2, y2 = self.bounds
         return (x1 + x2) // 2, (y1 + y2) // 2
 
-    def line(self) -> str:
+    def line(self, full: bool = False) -> str:
         x1, y1, x2, y2 = self.bounds
         parts = [f"[{self.handle}]", self.cls]
-        if self.text:
-            parts.append(f'"{self.text}"')
+        text = (self.full_text or self.text) if full else self.text
+        if text:
+            parts.append(f'"{text}"')
         if self.resource_id:
             parts.append(f"#{self.resource_id}")
         cx, cy = self.center
@@ -76,7 +78,7 @@ class Snapshot:
                 pass
         return False
 
-    def render(self) -> str:
+    def render(self, full: bool = False) -> str:
         head = f"package: {self.package}  elements: {len(self.elements)}"
         if self.rotation % 2:
             head += "  orientation: landscape"
@@ -84,7 +86,7 @@ class Snapshot:
             head += "  loading"
         if self.keyboard_top is not None:
             head += f"  keyboard: shown (covers y>={self.keyboard_top})"
-        return "\n".join([head, *(e.line() for e in self.elements.values())])
+        return "\n".join([head, *(e.line(full) for e in self.elements.values())])
 
 
 def _bounds(node: ET.Element) -> tuple[int, int, int, int] | None:
@@ -234,6 +236,7 @@ def parse(xml: str, screen: tuple[int, int] | None = None) -> Snapshot:
                     resource_id=rid.split(":id/", 1)[-1],
                     bounds=b,
                     flags=flags,
+                    full_text=" ".join(label.split()),
                 )
         for child in node:
             visit(child, clip)

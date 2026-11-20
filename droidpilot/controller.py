@@ -441,7 +441,8 @@ class Controller:
             name = "enter"
         # uiautomator2's press() waits for the UI to idle and takes 0.1-1 s;
         # a raw keyevent returns in ~50 ms and settle() does the waiting.
-        code = _KEYS.get(name) or (name if name.isdigit() else "KEYCODE_" + name.upper())
+        code = _KEYS.get(name) or (name if name.isdigit() else
+                                   name.upper() if name.startswith("keycode_") else "KEYCODE_" + name.upper())
         self.pacer.wait()
         self.device.call(lambda d: d.shell(["input", "keyevent", str(code)]))
 

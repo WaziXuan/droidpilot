@@ -66,9 +66,12 @@ def _act(action, observe_after: bool, max_wait_ms: int, quiet_ms: int = 400) -> 
 
 
 @mcp.tool()
-def observe(screenshot: bool = False, width: int = 540) -> list:
-    """List interactive and labelled elements on screen with handles. Optionally attach a screenshot."""
-    out: list = [ctl.observe().render()]
+def observe(screenshot: bool = False, width: int = 540, full_text: bool = False) -> list:
+    """List interactive and labelled elements on screen with handles. Optionally attach a screenshot.
+
+    Labels are cut to 60 characters to keep the list short; full_text=True gives them whole
+    (for reading long posts or comments)."""
+    out: list = [ctl.observe().render(full_text)]
     if screenshot:
         out.append(Image(data=ctl.screenshot(width), format="jpeg"))
     return out

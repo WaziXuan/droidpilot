@@ -135,3 +135,14 @@ def test_handles_are_sequential_and_lines_render():
     snap = uitree.parse(xml, SCREEN)
     assert list(snap.elements) == ["e1", "e2"]
     assert snap.elements["e1"].line() == '[e1] View "A" #a @(270,300) 540x200 click'
+
+
+def test_long_labels_are_cut_but_full_text_keeps_them():
+    long = "x" * 80 + "&#10;&#9;&#10;tail"
+    xml = hierarchy(node("[0,0][1080,2400]", node("[0,200][1080,400]", text=long)))
+    snap = uitree.parse(xml, SCREEN)
+    (el,) = snap.elements.values()
+    assert el.text.endswith("…") and len(el.text) == 60
+    assert el.full_text == "x" * 80 + " tail"
+    assert "x" * 59 + "…\"" in snap.render() and "x" * 60 not in snap.render()
+    assert '"' + "x" * 80 + ' tail"' in snap.render(full=True)
