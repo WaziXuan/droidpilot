@@ -36,7 +36,7 @@ Options (flags or environment variables):
 | Flag | Env | Default | |
 |---|---|---|---|
 | `--serial` | `DROIDPILOT_SERIAL` | only connected device | adb serial |
-| `--grpc` | `DROIDPILOT_GRPC` | `127.0.0.1:8554` | emulator gRPC address, `''` to disable |
+| `--grpc` | `DROIDPILOT_GRPC` | `127.0.0.1:8554`; off when `--serial` is a real device | emulator gRPC address, `''` to disable |
 | `--min-interval-ms` | `DROIDPILOT_MIN_INTERVAL_MS` | `300` | minimum gap between actions |
 | `--transport` / `--port` | | `stdio` / `8765` | `streamable-http` keeps one server (and its handles) alive across clients |
 

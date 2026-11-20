@@ -7,7 +7,7 @@ import sys
 def main() -> None:
     ap = argparse.ArgumentParser(prog="droidpilot", description="MCP server for driving an Android emulator.")
     ap.add_argument("--serial", help="adb serial (default: the only connected device)")
-    ap.add_argument("--grpc", help="emulator gRPC address, '' to disable (default 127.0.0.1:8554)")
+    ap.add_argument("--grpc", help="emulator gRPC address, '' to disable (default 127.0.0.1:8554; off when --serial names a real device)")
     ap.add_argument("--min-interval-ms", type=int, help="minimum gap between actions (default 300)")
     ap.add_argument("--no-follow-rotation", action="store_true",
                     help="don't turn the emulator window to match the display rotation")
