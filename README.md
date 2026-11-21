@@ -39,6 +39,35 @@ Options (flags or environment variables):
 | `--grpc` | `DROIDPILOT_GRPC` | `127.0.0.1:8554`; off when `--serial` is a real device | emulator gRPC address, `''` to disable |
 | `--min-interval-ms` | `DROIDPILOT_MIN_INTERVAL_MS` | `300` | minimum gap between actions |
 | `--transport` / `--port` | | `stdio` / `8765` | `streamable-http` keeps one server (and its handles) alive across clients |
+| `--agent` | `DROIDPILOT_AGENT` | off | `host[:port]` of the on-phone agent; replaces adb (see below) |
+
+### Wireless, reboot-proof: the on-phone agent
+
+adb over TCP is lost on every reboot, and on Android 10 and older only a USB cable
+turns it back on. `agent/` is a small app (no dependencies, built with the plain SDK
+tools) that runs as an **accessibility service**: Android restarts it by itself after a
+reboot, so a phone left somewhere stays drivable with nobody next to it. It serves the
+UI tree (in uiautomator's format, so the parser is shared), screenshots
+(MediaProjection), gestures, text entry and app launching over HTTP on port 8790,
+protected by a token only processes on the phone can read.
+
+```powershell
+python scripts/build_agent.py                                  # -> agent/build/droidpilot-agent.apk
+python scripts/setup_agent.py --serial SERIAL --check PHONE_IP # once, over USB: install, enable, grant, save token
+python -m droidpilot --agent PHONE_IP --transport streamable-http --port 8766
+```
+
+`PHONE_IP` is any address the PC can reach, e.g. the phone's Tailscale IP. The token
+is saved to `~/.droidpilot/agent_token` (or set `DROIDPILOT_AGENT_TOKEN`). Keep
+`agent/build/agent.keystore`: updates signed with another key must uninstall first.
+
+Requirements and limits: no PIN/pattern lock (Android starts no apps after a reboot
+until the first unlock; a swipe lock is passed automatically). Without adb there is
+no force-stop (`app_stop` goes home and kills the background app) and keys are
+limited to home, back, recents, notifications, power, wakeup, sleep and delete;
+`press_key enter` still works by tapping the keyboard's action key.
+Measured on an Xperia XZ1 Compact (Android 9) over Tailscale: observe ≈0.13 s,
+540 px screenshot ≈0.1 s; back up about a minute after `adb reboot`.
 
 ## What the agent sees
 

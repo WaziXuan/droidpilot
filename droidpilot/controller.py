@@ -16,6 +16,7 @@ from PIL import Image, ImageChops, ImageStat
 from uiautomator2.exceptions import UiObjectNotFoundError
 
 from droidpilot import uitree
+from droidpilot.agent import AgentDevice, AgentError
 from droidpilot.device import Device
 from droidpilot.emulator import Emulator
 
@@ -73,8 +74,12 @@ class Pacer:
 
 class Controller:
     def __init__(self, serial: str | None = None, grpc_address: str | None = "127.0.0.1:8554",
-                 min_interval_ms: int = 300, follow_rotation: bool = True):
-        self.device = Device(serial)
+                 min_interval_ms: int = 300, follow_rotation: bool = True, agent: str | None = None):
+        # agent="host:port" drives the on-phone accessibility agent over the network instead of adb.
+        self.agent = agent
+        self.device = AgentDevice(agent) if agent else Device(serial)
+        if agent:
+            grpc_address = None
         # Keep the emulator window turned the same way as the display, so whoever watches
         # the window sees the app upright (an app forcing landscape otherwise shows sideways).
         self.follow_rotation = follow_rotation
@@ -128,7 +133,8 @@ class Controller:
     def backends(self) -> dict:
         self.observe()  # refresh rotation
         return {
-            "uiautomator2": self.device.serial or "auto",
+            "uiautomator2": None if self.agent else (self.device.serial or "auto"),
+            "agent": self.agent,
             "emulator_grpc": self.emu.address if self.emu else None,
             "screen": self.screen,
             "rotation": self.rotation,
@@ -259,6 +265,8 @@ class Controller:
     def screenshot(self, width: int = 540, quality: int = 70) -> bytes:
         if self.emu:
             frame = self.emu.screenshot(width)
+        elif self.agent:
+            frame = self.device.call(lambda d: d.screenshot(width))  # scaled on the phone: less to send
         else:
             frame = self.device.call(lambda d: d.screenshot())
             w, h = frame.size
@@ -315,6 +323,8 @@ class Controller:
         self.pacer.wait()
         if self.emu:
             self.emu.swipe(x1, y1, x2, y2, duration_ms, hold_ms, end_hold_ms)
+        elif self.agent:
+            self.device.call(lambda d: d.swipe_ex(x1, y1, x2, y2, duration_ms, hold_ms, end_hold_ms))
         elif hold_ms:
             self.device.call(lambda d: d.drag(x1, y1, x2, y2, (hold_ms + duration_ms) / 1000))
         else:
@@ -344,14 +354,17 @@ class Controller:
         self.swipe(f"{sx},{sy}", f"{ex},{ey}", duration_ms, end_hold_ms=0 if fling else 120)
 
     def pinch(self, zoom: str, target: str | None = None, duration_ms: int = 400) -> None:
-        if not self.emu:
-            raise TargetError("pinch needs the emulator gRPC endpoint (start the emulator with -grpc)")
+        if not self.emu and not self.agent:
+            raise TargetError("pinch needs the emulator gRPC endpoint (start the emulator with -grpc) or the agent")
         w, h = self.screen
         cx, cy = self.resolve(target) if target else (w // 2, h // 2)
         near, far = w // 8, w // 2
         start, end = (near, far) if zoom == "in" else (far, near)
         self.pacer.wait()
-        self.emu.pinch(cx, cy, start, end, duration_ms)
+        if self.emu:
+            self.emu.pinch(cx, cy, start, end, duration_ms)
+        else:
+            self.device.call(lambda d: d.pinch(cx, cy, start, end, duration_ms))
 
     def rotate(self, orientation: str) -> None:
         """Turn the device to portrait/landscape the way a person would: by turning it.
@@ -411,10 +424,20 @@ class Controller:
         # The tap that focused the field normally just returned a fresh tree, so
         # look for the field's hint there; dumping again can block for ~0.5 s
         # while the app is still reacting to that tap.
-        field = _focused_field(getattr(self, "_last_xml", None)) or _focused_field(self._dump())
+        # `is None`, not `or`: an Element without children is falsy.
+        field = _focused_field(getattr(self, "_last_xml", None))
+        if field is None:
+            field = _focused_field(self._dump())
         if field is None:
             raise TargetError("no focused text field; tap the field first")
         hint = field.get("hint")
+        if self.agent:
+            self.pacer.wait()
+            try:
+                self.device.call(lambda d: d.set_text(text, clear, hint))
+            except AgentError as e:
+                raise TargetError(str(e)) from None
+            return
 
         def set_text(d):
             el = d(focused=True)
@@ -444,6 +467,13 @@ class Controller:
         code = _KEYS.get(name) or (name if name.isdigit() else
                                    name.upper() if name.startswith("keycode_") else "KEYCODE_" + name.upper())
         self.pacer.wait()
+        if self.agent:
+            # No adb: the agent maps keys to accessibility global actions (home, back, recents...).
+            try:
+                self.device.call(lambda d: d.key(code))
+            except AgentError as e:
+                raise TargetError(str(e)) from None
+            return
         self.device.call(lambda d: d.shell(["input", "keyevent", str(code)]))
 
     def wait_for(self, text: str | None = None, resource_id: str | None = None,
@@ -474,6 +504,8 @@ class Controller:
         self.device.call(lambda d: d.app_stop(package))
 
     def app_current(self) -> dict:
+        if self.agent:
+            return self.device.call(lambda d: d.current_app())
         # uiautomator2's app_current() takes ~5 s on recent images; dumpsys takes ~35 ms.
         out = self.device.call(lambda d: d.shell(
             "dumpsys activity activities | grep -m1 -E 'topResumedActivity|mResumedActivity'").output)

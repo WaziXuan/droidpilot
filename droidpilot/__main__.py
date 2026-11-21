@@ -7,6 +7,7 @@ import sys
 def main() -> None:
     ap = argparse.ArgumentParser(prog="droidpilot", description="MCP server for driving an Android emulator.")
     ap.add_argument("--serial", help="adb serial (default: the only connected device)")
+    ap.add_argument("--agent", help="host[:port] of the on-phone accessibility agent (wireless, no adb; port 8790)")
     ap.add_argument("--grpc", help="emulator gRPC address, '' to disable (default 127.0.0.1:8554; off when --serial names a real device)")
     ap.add_argument("--min-interval-ms", type=int, help="minimum gap between actions (default 300)")
     ap.add_argument("--no-follow-rotation", action="store_true",
@@ -18,6 +19,8 @@ def main() -> None:
     # The server reads its config from the environment at import time.
     if args.serial:
         os.environ["DROIDPILOT_SERIAL"] = args.serial
+    if args.agent:
+        os.environ["DROIDPILOT_AGENT"] = args.agent
     if args.grpc is not None:
         os.environ["DROIDPILOT_GRPC"] = args.grpc
     if args.min_interval_ms is not None:

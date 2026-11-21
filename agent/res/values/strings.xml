@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="description">Lets droidpilot read the screen and touch it over the network (token protected).</string>
+</resources>

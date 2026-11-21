@@ -30,6 +30,8 @@ web content without accessibility info).
 """
 
 _serial = os.environ.get("DROIDPILOT_SERIAL") or None
+# host:port of the on-phone accessibility agent; replaces adb entirely when set.
+_agent = os.environ.get("DROIDPILOT_AGENT") or None
 # The emulator gRPC endpoint only belongs to an emulator. For a real device it must stay off by
 # default: if an emulator were also running, frames would come from it while taps hit the phone.
 _default_grpc = "127.0.0.1:8554" if not _serial or _serial.startswith("emulator-") else ""
@@ -39,6 +41,7 @@ ctl = Controller(
     grpc_address=os.environ.get("DROIDPILOT_GRPC", _default_grpc) or None,
     min_interval_ms=int(os.environ.get("DROIDPILOT_MIN_INTERVAL_MS", "300")),
     follow_rotation=os.environ.get("DROIDPILOT_FOLLOW_ROTATION", "1") != "0",
+    agent=_agent,
 )
 mcp = MCPServer("droidpilot", instructions=INSTRUCTIONS)
 
