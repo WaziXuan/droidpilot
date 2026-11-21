@@ -206,6 +206,7 @@ public class AgentService extends AccessibilityService {
             case "/apps": return apps();
             case "/rotate": return rotate(body.getInt("rotation"));
             case "/capture": Capture.request(this); return ok(new JSONObject().put("requested", true));
+            case "/nettest": return ok(NetTest.run(body));
             default: return HttpServer.Response.json(404, "{\"error\":\"no such endpoint\"}");
         }
     }
