@@ -66,6 +66,16 @@ until the first unlock; a swipe lock is passed automatically). Without adb there
 no force-stop (`app_stop` goes home and kills the background app) and keys are
 limited to home, back, recents, notifications, power, wakeup, sleep and delete;
 `press_key enter` still works by tapping the keyboard's action key.
+If Tailscale's split tunneling excludes an app (say Termux, so its traffic keeps using the
+local connection), that app can't answer connections over the tailnet. The agent stays
+inside the VPN and can forward for it, accepting only on the Tailscale address; forwards
+are saved and come back after a reboot:
+
+```bash
+curl -H "X-Token: $TOKEN" -d '{"listen":8023,"target":8022}' http://PHONE_IP:8790/forwards  # tailnet :8023 -> 127.0.0.1:8022
+curl -H "X-Token: $TOKEN" -d '{"listen":8023,"remove":true}' http://PHONE_IP:8790/forwards
+```
+
 Measured on an Xperia XZ1 Compact (Android 9) over Tailscale: observe ≈0.13 s,
 540 px screenshot ≈0.1 s; back up about a minute after `adb reboot`.
 

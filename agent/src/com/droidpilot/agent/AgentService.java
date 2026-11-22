@@ -32,6 +32,8 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
 import java.util.ArrayList;
+import java.util.Map;
+import java.util.TreeMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.Callable;
@@ -48,7 +50,7 @@ import java.util.concurrent.atomic.AtomicReference;
 public class AgentService extends AccessibilityService {
     static final String TAG = HttpServer.TAG;
     static final int PORT = 8790;
-    static final String VERSION = "0.1";
+    static final String VERSION = "0.2";
 
     // Labels of the system screen-capture dialog (English, Chinese, Japanese).
     private static final String[] START_LABELS = {"start now", "立即开始", "立即開始", "今すぐ開始"};
@@ -59,6 +61,7 @@ public class AgentService extends AccessibilityService {
     private String token;
     private volatile String lastPackage = "", lastActivity = "";
     private PowerManager.WakeLock wakeLock;
+    private final Map<Integer, PortForward> forwards = new TreeMap<>();
 
     // -- lifecycle --------------------------------------------------------------
 
@@ -68,6 +71,7 @@ public class AgentService extends AccessibilityService {
         token = loadToken();
         server = new HttpServer(PORT, this::route);
         server.start();
+        restoreForwards();
         // Ask for screen capture once the system has settled after boot.
         main.postDelayed(() -> { if (!Capture.ready()) Capture.request(this); }, 5000);
         Log.i(TAG, "agent " + VERSION + " connected");
@@ -87,6 +91,10 @@ public class AgentService extends AccessibilityService {
 
     private void shutdown() {
         if (server != null) { server.stop(); server = null; }
+        synchronized (forwards) {
+            for (PortForward f : forwards.values()) f.close();
+            forwards.clear();
+        }
         Capture.stop();
         if (wakeLock != null && wakeLock.isHeld()) wakeLock.release();
     }
@@ -172,6 +180,65 @@ public class AgentService extends AccessibilityService {
         return MessageDigest.isEqual(given.getBytes(StandardCharsets.UTF_8), token.getBytes(StandardCharsets.UTF_8));
     }
 
+    // -- port forwards ------------------------------------------------------------
+
+    /**
+     * {} lists; {"listen": 8023, "target": 8022} adds (saved, restored after reboot);
+     * {"listen": 8023, "remove": true} removes. See PortForward for what it is for.
+     */
+    private HttpServer.Response forwardsRoute(JSONObject body) throws Exception {
+        if (body.has("listen")) {
+            int listen = body.getInt("listen");
+            if (listen < 1024 || listen > 65535 || listen == PORT) throw new IllegalArgumentException("bad listen port");
+            synchronized (forwards) {
+                PortForward old = forwards.remove(listen);
+                if (old != null) old.close();
+                if (!body.optBoolean("remove")) {
+                    int target = body.getInt("target");
+                    if (target < 1 || target > 65535) throw new IllegalArgumentException("bad target port");
+                    forwards.put(listen, new PortForward(listen, target));
+                }
+                saveForwards();
+            }
+        }
+        JSONArray list = new JSONArray();
+        synchronized (forwards) {
+            for (PortForward f : forwards.values()) list.put(new JSONObject().put("listen", f.listen).put("target", f.target));
+        }
+        return ok(new JSONObject().put("forwards", list));
+    }
+
+    private void saveForwards() {
+        StringBuilder sb = new StringBuilder();
+        for (PortForward f : forwards.values()) sb.append(sb.length() > 0 ? "," : "").append(f.listen).append(':').append(f.target);
+        getSharedPreferences("agent", Context.MODE_PRIVATE).edit().putString("forwards", sb.toString()).apply();
+    }
+
+    private void restoreForwards() {
+        String saved = getSharedPreferences("agent", Context.MODE_PRIVATE).getString("forwards", "");
+        for (String item : saved.split(",")) {
+            if (item.isEmpty()) continue;
+            String[] lt = item.split(":");
+            int listen = Integer.parseInt(lt[0]), target = Integer.parseInt(lt[1]);
+            // The port can still be held by the previous instance for a moment; retry in the background.
+            new Thread(() -> {
+                for (int i = 0; i < 30; i++) {
+                    try {
+                        PortForward f = new PortForward(listen, target);
+                        synchronized (forwards) {
+                            if (server == null) { f.close(); return; }
+                            forwards.put(listen, f);
+                        }
+                        return;
+                    } catch (java.io.IOException e) {
+                        try { Thread.sleep(2000); } catch (InterruptedException ie) { return; }
+                    }
+                }
+                Log.w(TAG, "forward " + listen + " could not bind");
+            }, "restore-forward").start();
+        }
+    }
+
     // -- routing ----------------------------------------------------------------
 
     private HttpServer.Response route(HttpServer.Request req) throws Exception {
@@ -207,6 +274,7 @@ public class AgentService extends AccessibilityService {
             case "/rotate": return rotate(body.getInt("rotation"));
             case "/capture": Capture.request(this); return ok(new JSONObject().put("requested", true));
             case "/nettest": return ok(NetTest.run(body));
+            case "/forwards": return forwardsRoute(body);
             default: return HttpServer.Response.json(404, "{\"error\":\"no such endpoint\"}");
         }
     }
